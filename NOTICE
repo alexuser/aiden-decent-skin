@@ -1,0 +1,44 @@
+Aiden 0.1.0-alpha.1
+Copyright (c) 2026 Aiden contributors.
+
+The new Aiden runtime, synthetic tests, build scripts and project-owned icons
+are licensed under GNU GPL version 3 only (SPDX: GPL-3.0-only), as authorized by
+the release owner on 2026-10-03. The full license is in COPYING and
+LICENSES/GPL-3.0-only.txt. This program is distributed without any warranty;
+see the full license for its terms.
+
+Inter 3.019 (git-0a5106e0b), unchanged Regular and SemiBold fonts
+  Copyright (c) 2016-2020 The Inter Project Authors.
+  The embedded font name tables identify Copyright 2020 The Inter Project Authors.
+  "Inter" is trademark of Rasmus Andersson.
+  https://github.com/rsms/inter
+  License: SIL Open Font License 1.1, LICENSES/OFL-1.1.txt.
+  Matching notice source:
+  https://raw.githubusercontent.com/rsms/inter/0a5106e0b/LICENSE.txt
+
+Phosphor Icons, regular SVGs and recolored/resized PNG derivatives
+  Copyright (c) 2023 Phosphor Icons.
+  https://github.com/phosphor-icons/core
+  License: MIT, LICENSES/MIT-Phosphor.txt.
+  Full MIT notice also accompanies the Phosphor SVGs and runtime icon assets.
+  The 14 local upstream SVGs have recorded file hashes, but no recorded upstream
+  revision. Aiden includes those sources with their derived rasters.
+
+The font and Phosphor licenses remain separate from Aiden's code license.
+Retain their complete notices when redistributing those assets.
+
+External installed dependencies, not distributed here
+  de1app: https://github.com/decentespresso/de1app (root LICENSE: GNU GPL v3).
+  DSx2: https://github.com/decentespresso/DSx2,
+    fork of https://github.com/Damian-AU/DSx2.
+    No explicit root license was located in the inspected upstream/fork.
+    DSx2 is an installed prerequisite; none of its code or skin assets is bundled.
+  DUI/Tcl/Tk, native plugins and native font/symbol providers, including any
+    FontAwesome fallback, are supplied by the installed application.
+
+Build-only tools, not distributed here
+  Playwright 1.58.0: Apache-2.0, https://github.com/microsoft/playwright
+  Pillow 12.2.0: MIT-CMU, https://github.com/python-pillow/Pillow
+  No tool binaries, browser cache or virtual environment is bundled.
+
+Compatibility names and attribution do not imply upstream endorsement.

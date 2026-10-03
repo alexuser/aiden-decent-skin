@@ -1,0 +1,629 @@
+# SPDX-License-Identifier: GPL-3.0-only
+package require tcltest 2
+namespace import ::tcltest::*
+
+namespace eval ::recipe_fixture {
+    variable root [makeDirectory aiden-recipe]
+    variable calls {}
+    variable status [dict create native_state Idle editable 1 pending {} context_verified 1 current_page aiden_recipe current_context aiden_recipe]
+    variable failure {}
+    variable translated 0
+    proc write {path data} {
+        set channel [open $path w]
+        fconfigure $channel -encoding utf-8 -translation lf
+        dict for {key value} $data {puts $channel "[list $key] [list $value]"}
+        close $channel
+    }
+    proc read {path} {
+        set channel [open $path r]
+        fconfigure $channel -encoding utf-8
+        set result [::read $channel]
+        close $channel
+        dict size $result
+        return $result
+    }
+    proc bytes {path} {
+        set channel [open $path rb]
+        set result [::read $channel]
+        close $channel
+        return $result
+    }
+    proc path {id} {return [file join $::recipe_fixture::root profiles ${id}.tcl]}
+    proc setup {} {
+        variable root
+        variable calls
+        variable status
+        variable failure
+        variable translated
+        foreach path [glob -nocomplain -directory $root *] {file delete -force $path}
+        file mkdir [file join $root profiles]
+        file mkdir [file join $root aiden]
+        set simple [dict create profile_title {Gentle / Original complete recipe name} \
+            settings_profile_type settings_2a profile_hide 0 read_only 1 \
+            read_only_backup {} profile_notes {A complete explanatory note.} advanced_shot {} \
+            espresso_temperature 88 espresso_temperature_0 88 espresso_temperature_1 87 \
+            espresso_temperature_2 86 espresso_temperature_3 85 espresso_temperature_steps_enabled 1 \
+            final_desired_shot_weight 36 final_desired_shot_weight_advanced 36 \
+            final_desired_shot_volume 36 final_desired_shot_volume_advanced 36 \
+            profile_grinder_dose_weight {}]
+        write [path gentle] $simple
+        set flow $simple
+        dict set flow profile_title {Flow / Bloom / Unabridged alternative name}
+        dict set flow settings_profile_type settings_2b
+        dict set flow espresso_temperature 92
+        dict set flow espresso_temperature_steps_enabled 0
+        dict set flow final_desired_shot_weight 42
+        dict set flow read_only 0
+        write [path flow] $flow
+        set advanced $simple
+        dict set advanced profile_title {Advanced [literal] $temperature; full title}
+        dict set advanced settings_profile_type settings_2c
+        dict set advanced espresso_temperature 94
+        dict set advanced final_desired_shot_weight_advanced 45
+        dict set advanced advanced_shot [list \
+            [dict create name Fill temperature 94 pump flow flow 4 seconds 5] \
+            [dict create name {Hold / literal} temperature 92.5 pump pressure pressure 8 seconds 25] \
+            [dict create name Decline temperature 90 pump pressure pressure 5 seconds 15]]
+        write [path advanced] $advanced
+        set custom $advanced
+        dict set custom advanced_shot_tcl {set ::recipe_fixture::script_ran 1; start_espresso}
+        write [path scripted] $custom
+        dict unset custom advanced_shot_tcl
+        dict set custom profile_editor DFlow
+        write [path custom_editor] $custom
+        set hidden $flow
+        dict set hidden profile_hide 1
+        write [path hidden] $hidden
+        set channel [open [path malformed] w]; puts $channel {profile_title}; close $channel
+        array unset ::settings
+        array set ::settings $simple
+        array set ::settings {profile_filename gentle grinder_dose_weight 18 minimum_water_temperature 1 \
+            advanced_shot_tcl {} profile_editor {} profile_has_changed 0 unrelated keep}
+        array unset ::de1
+        array set ::de1 {state 2 current_context aiden_recipe}
+        array unset ::de1_num_state
+        array set ::de1_num_state {2 Idle 4 Espresso 0 Sleep}
+        set status [dict create native_state Idle editable 1 pending {} context_verified 1 current_page aiden_recipe current_context aiden_recipe]
+        set failure {}
+        set translated 0
+        unset -nocomplain ::recipe_fixture::script_ran
+        write [settings_filename] [array get ::settings]
+        ::aiden::recipe::configure -profile_dir [file join $root profiles] \
+            -state_file [file join $root aiden recipe-state.tcl]
+        set calls {}
+    }
+}
+proc ::homedir {} {return $::recipe_fixture::root}
+proc ::settings_filename {} {return [file join $::recipe_fixture::root settings.tcl]}
+proc ::profile_vars {} {
+    return {profile_title settings_profile_type profile_hide read_only read_only_backup \
+        profile_notes advanced_shot espresso_temperature espresso_temperature_0 \
+        espresso_temperature_1 espresso_temperature_2 espresso_temperature_3 \
+        espresso_temperature_steps_enabled final_desired_shot_weight \
+        final_desired_shot_weight_advanced final_desired_shot_volume \
+        final_desired_shot_volume_advanced profile_grinder_dose_weight}
+}
+namespace eval ::profile {}
+proc ::profile::read_legacy {mode path extras} {
+    if {$mode ne "profile_file"} {error {Unexpected native read mode}}
+    set raw [::recipe_fixture::read $path]
+    set result [dict create]
+    foreach key [concat [profile_vars] $extras] {
+        if {[dict exists $raw $key]} {dict set result $key [dict get $raw $key]}
+    }
+    dict set result profile_filename [file rootname [file tail $path]]
+    # Like the installed reader, simple profiles expose generated stage previews.
+    if {[dict get $result settings_profile_type] in {settings_2a settings_2b}} {
+        set stages {}
+        foreach index {0 1 2 3} {
+            set temp [dict get $result espresso_temperature]
+            if {[dict get $result espresso_temperature_steps_enabled]} {
+                set temp [dict get $result espresso_temperature_$index]
+            }
+            lappend stages [dict create name "Stage $index" temperature $temp pump pressure pressure 8 seconds 5]
+        }
+        dict set result advanced_shot $stages
+    }
+    return $result
+}
+proc ::profile::filename_from_title {title} {
+    set fn $title
+    regsub -all {\s+} $fn _ fn
+    regsub -all {\/+} $fn __ fn
+    regsub -all {[\u0000-\u001f;:?<>(){}\[\]\|!@#$%^&*-\+=~`,.'"]+} $fn {} fn
+    return [string range $fn 0 59]
+}
+proc ::profile::sync_from_legacy {} {lappend ::recipe_fixture::calls sync}
+proc ::update_onscreen_variables {} {lappend ::recipe_fixture::calls update}
+proc ::send_de1_settings_soon {} {lappend ::recipe_fixture::calls send_settings}
+proc ::select_profile {id} {
+    lappend ::recipe_fixture::calls [list select_profile $id]
+    if {$::recipe_fixture::failure eq "select"} {
+        set ::settings(profile_title) {Partial native recipe}
+        error {Native loader failed}
+    }
+    set raw [::recipe_fixture::read [::recipe_fixture::path $id]]
+    # Installed load_settings_vars discards the obsolete global-dose field.
+    dict unset raw grinder_dose_weight
+    array set ::settings $raw
+    set ::settings(profile_filename) $id
+    set ::settings(advanced_shot_tcl) {}
+    set ::settings(profile_editor) {}
+    set ::settings(profile_has_changed) 0
+    if {$::recipe_fixture::translated} {set ::settings(profile_title) {Traduit par Decent}}
+    ::profile::sync_from_legacy
+    ::update_onscreen_variables
+    ::send_de1_settings_soon
+    return {}
+}
+proc ::save_settings {} {
+    lappend ::recipe_fixture::calls save_settings
+    if {$::recipe_fixture::failure eq "save"} {error {Native save failed}}
+    if {$::recipe_fixture::failure eq "silent_save"} {return 0}
+    ::recipe_fixture::write [settings_filename] [array get ::settings]
+    return 1
+}
+namespace eval ::aiden::core {}
+proc ::aiden::core::snapshot {} {return $::recipe_fixture::status}
+foreach command {start_espresso start_idle start_flush start_steam start_water \
+    save_settings_to_de1 de1_send_state de1_send_shot_frames} {
+    proc ::$command {args} {error {HARDWARE FENCE: a physical command was dispatched}}
+}
+
+array set ::settings {profile_title {Before source}}
+set before_source [array get ::settings]
+source [file join [file dirname [info script]] .. aiden recipe.tcl]
+
+test recipe-source-1 {Sourcing is declarative, with no hardware or settings writes} -body {
+    list $::recipe_fixture::calls [expr {$before_source eq [array get ::settings]}] \
+        [file exists [file join $::recipe_fixture::root aiden recipe-state.tcl]]
+} -result {{} 1 0}
+
+test recipe-browse-1 {Search, preview, pending selection and Cancel do not mutate settings/files} -setup {
+    ::recipe_fixture::setup
+} -body {
+    set before [array get ::settings]
+    set source [::recipe_fixture::read [::recipe_fixture::path gentle]]
+    ::aiden::recipe::begin chooser
+    set match [::aiden::recipe::catalog {Flow bloom} flow]
+    ::aiden::recipe::select flow
+    ::aiden::recipe::preview flow
+    ::aiden::recipe::cancel
+    list [dict get [lindex $match 0] fullname] \
+        [::aiden::recipe::dict_equal $before [array get ::settings]] \
+        [::aiden::recipe::dict_equal $source [::recipe_fixture::read [::recipe_fixture::path gentle]]] \
+        $::recipe_fixture::calls [file exists $::aiden::recipe::state_file]
+} -result {{Flow / Bloom / Unabridged alternative name} 1 1 {} 0}
+
+test recipe-catalog-1 {Custom and malformed profiles stay explanatory rows without running code} -setup {
+    ::recipe_fixture::setup
+} -body {
+    ::aiden::recipe::begin chooser
+    set flags {}
+    foreach id {scripted custom_editor malformed} {
+        set r [::aiden::recipe::preview $id]
+        lappend flags [dict get $r applyable] [catch {::aiden::recipe::choose $id}]
+    }
+    list $flags [info exists ::recipe_fixture::script_ran] $::recipe_fixture::calls
+} -result {{0 1 0 1 0 1} 0 {}}
+
+test recipe-catalog-2 {Literal metacharacters and complete names are preserved} -setup {
+    ::recipe_fixture::setup
+} -body {
+    set row [lindex [::aiden::recipe::catalog {[literal] $temperature;}] 0]
+    list [dict get $row id] [dict get $row title] [llength [dict get $row stagepreview]]
+} -result {advanced {Advanced [literal] $temperature; full title} 3}
+
+test recipe-catalog-3 {An empty profile directory gives an empty catalog} -setup {
+    ::recipe_fixture::setup
+    file mkdir [file join $::recipe_fixture::root empty]
+    ::aiden::recipe::configure -profile_dir [file join $::recipe_fixture::root empty] \
+        -state_file [file join $::recipe_fixture::root aiden empty-state.tcl]
+} -body {::aiden::recipe::catalog} -result {}
+
+test recipe-choose-1 {Explicit choose selects one stable identity and verifies native persistence} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+    ::aiden::recipe::select flow
+} -body {
+    set result [::aiden::recipe::choose flow]
+    set saved [::recipe_fixture::read [settings_filename]]
+    list [dict get $result profile_id] [dict get $saved profile_filename] \
+        $::recipe_fixture::calls [dict get [::aiden::recipe::state] pending] \
+        [dict get [::recipe_fixture::read $::aiden::recipe::state_file] recent]
+} -result {flow flow {{select_profile flow} sync update send_settings save_settings} {} flow}
+
+test recipe-choose-2 {Choosing the current profile preserves committed adjustments} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply [dict create yield 40]
+    set ::recipe_fixture::calls {}
+    ::aiden::recipe::begin chooser
+} -body {
+    set before [array get ::settings]
+    set result [::aiden::recipe::choose gentle]
+    list [dict get $result modified] [::aiden::recipe::dict_equal $before [array get ::settings]] $::recipe_fixture::calls
+} -result {1 1 {}}
+
+test recipe-choose-3 {Native translated title can differ without confusing stable identity} -setup {
+    ::recipe_fixture::setup
+    set ::recipe_fixture::translated 1
+    ::aiden::recipe::begin chooser
+} -body {
+    set result [::aiden::recipe::choose flow]
+    list [dict get $result profile_id] [dict get $result title]
+} -result {flow {Traduit par Decent}}
+
+test recipe-choose-4 {External native profile changes invalidate a pending commit} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+    ::aiden::recipe::select flow
+    set ::settings(profile_filename) advanced
+} -body {
+    list [catch {::aiden::recipe::choose flow}] $::recipe_fixture::calls $::settings(profile_filename)
+} -result {1 {} advanced}
+
+test recipe-guard-1 {Missing state, active operation, pending request, and unsafe context fail closed} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    set errors {}
+    foreach override {
+        {native_state Espresso editable 0}
+        {pending start_requested}
+        {context_verified 0}
+        {editable 0}
+    } {
+        set ::recipe_fixture::status [dict merge {native_state Idle editable 1 pending {} context_verified 1 current_page aiden_recipe current_context aiden_recipe} $override]
+        lappend errors [catch {::aiden::recipe::apply {yield 40}}]
+    }
+    set ::recipe_fixture::status {native_state Idle editable 1 pending {}}
+    lappend errors [catch {::aiden::recipe::apply {yield 40}}]
+    set ::recipe_fixture::status {native_state Idle editable 1 pending {} context_verified 1 current_page aiden_recipe current_context aiden_recipe}
+    set ::de1(state) 4
+    lappend errors [catch {::aiden::recipe::apply {yield 40}}]
+    list $errors $::recipe_fixture::calls [file exists $::aiden::recipe::state_file]
+} -result {{1 1 1 1 1 1} {} 0}
+
+test recipe-guard-2 {A missing verified core API prevents mutation} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    rename ::aiden::core::snapshot ::aiden::core::saved_snapshot
+} -body {
+    list [catch {::aiden::recipe::apply {yield 40}}] $::recipe_fixture::calls
+} -cleanup {rename ::aiden::core::saved_snapshot ::aiden::core::snapshot} -result {1 {}}
+
+test recipe-guard-3 {An alternate profile folder cannot target native globals} -setup {
+    ::recipe_fixture::setup
+    set other [file join $::recipe_fixture::root alternate]
+    file mkdir $other
+    file copy [::recipe_fixture::path gentle] [file join $other gentle.tcl]
+    ::aiden::recipe::configure -profile_dir $other -state_file [file join $::recipe_fixture::root aiden state.tcl]
+    ::aiden::recipe::begin
+} -body {
+    list [catch {::aiden::recipe::apply {yield 40}}] $::recipe_fixture::calls
+} -result {1 {}}
+
+test recipe-invalid-1 {Invalid numeric input and unsupported fields cause no partial mutation} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    set before [array get ::settings]
+    set errors {}
+    foreach input {{dose 1} {dose 41} {yield -1} {yield 101} {temperature 106} \
+        {temperature NaN} {yield Inf} {yield 1e9999} {dose {18; start_espresso}} {unknown 1} {ratio 1000}} {
+        lappend errors [catch {::aiden::recipe::apply $input}]
+    }
+    list $errors [::aiden::recipe::dict_equal $before [array get ::settings]] \
+        $::recipe_fixture::calls [file exists $::aiden::recipe::state_file]
+} -result {{1 1 1 1 1 1 1 1 1 1 1} 1 {} 0}
+
+test recipe-apply-1 {Use adjustments persists working data without changing source profile} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    set source [::recipe_fixture::bytes [::recipe_fixture::path gentle]]
+    set result [::aiden::recipe::apply {dose 20 yield 40 temperature 90}]
+    set native [::recipe_fixture::read [settings_filename]]
+    set saved [::recipe_fixture::read $::aiden::recipe::state_file]
+    list [dict get $result profile_id] [dict get $result dose] [dict get $result yield] \
+        [dict get $result temperature] [dict get $result modified] \
+        [dict get $native grinder_dose_weight] [dict get $saved working profile_id] \
+        [expr {$source eq [::recipe_fixture::bytes [::recipe_fixture::path gentle]]}] \
+        $::recipe_fixture::calls [dict exists $saved draft]
+} -result {gentle 20.0 40.0 90.0 1 20 gentle 1 {sync update save_settings send_settings} 0}
+
+test recipe-temperature-1 {Simple staged offset preserves all temperature differences} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    ::aiden::recipe::apply {temperature 90}
+    list $::settings(espresso_temperature) $::settings(espresso_temperature_0) \
+        $::settings(espresso_temperature_1) $::settings(espresso_temperature_2) $::settings(espresso_temperature_3)
+} -result {90 90.0 89.0 88.0 87.0}
+
+test recipe-temperature-2 {Advanced offset preserves each native stage delta and snapshot context} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+    ::aiden::recipe::choose advanced
+    set ::recipe_fixture::calls {}
+    ::aiden::recipe::begin
+} -body {
+    set frozen [::aiden::recipe::snapshot]
+    ::aiden::recipe::apply {temperature 95.5 yield 60}
+    set temperatures {}
+    foreach step $::settings(advanced_shot) {lappend temperatures [dict get $step temperature]}
+    list $temperatures [dict get $frozen temperature] [dict get $frozen yield] \
+        [dict get [::aiden::recipe::snapshot] temperature]
+} -result {{95.5 94.0 91.5} 94.0 45.0 95.5}
+
+test recipe-temperature-3 {An offset pushing a later stage past native bounds is rejected first} -setup {
+    ::recipe_fixture::setup
+    set ::settings(espresso_temperature_3) 104
+    ::aiden::recipe::begin
+} -body {
+    set before [array get ::settings]
+    list [catch {::aiden::recipe::apply {temperature 91}}] \
+        [::aiden::recipe::dict_equal $before [array get ::settings]] $::recipe_fixture::calls
+} -result {1 1 {}}
+
+test recipe-temperature-4 {Unsupported simple first-stage normalization routes to the original editor} -setup {
+    ::recipe_fixture::setup
+    set ::settings(espresso_temperature_0) 89
+    ::aiden::recipe::begin
+} -body {
+    list [catch {::aiden::recipe::apply {temperature 90}}] $::recipe_fixture::calls
+} -result {1 {}}
+
+test recipe-ratio-1 {Dose/yield derive ratio; editing ratio updates yield without global draft writes} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    set edited [::aiden::recipe::edit {dose 20 yield 50}]
+    set edited [::aiden::recipe::edit {ratio 3}]
+    set before $::settings(final_desired_shot_weight)
+    set result [::aiden::recipe::apply $edited]
+    list [dict get $edited ratio] [dict get $edited yield] $before \
+        [dict get $result ratio] [dict get $result yield]
+} -result {3.0 60.0 36 3.0 60.0}
+
+test recipe-cancel-1 {Cancel a later draft preserves earlier committed overrides and state file} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply {yield 40}
+    set ::recipe_fixture::calls {}
+} -body {
+    set before [::recipe_fixture::read $::aiden::recipe::state_file]
+    ::aiden::recipe::begin
+    ::aiden::recipe::edit {yield 60 temperature 90}
+    ::aiden::recipe::cancel
+    set result [::aiden::recipe::working]
+    list [dict get $result yield] [dict get $result temperature] [dict get $result modified] \
+        [::aiden::recipe::dict_equal $before [::recipe_fixture::read $::aiden::recipe::state_file]] $::recipe_fixture::calls
+} -result {40.0 88.0 1 1 {}}
+
+test recipe-restart-1 {Restart reads committed native working settings and does not replay a draft} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply {dose 20 yield 40 temperature 90}
+    ::aiden::recipe::begin
+    ::aiden::recipe::edit {yield 60}
+} -body {
+    array unset ::settings
+    array set ::settings [::recipe_fixture::read [settings_filename]]
+    set ::recipe_fixture::calls {}
+    ::aiden::recipe::configure -profile_dir [file join $::recipe_fixture::root profiles] \
+        -state_file [file join $::recipe_fixture::root aiden recipe-state.tcl]
+    set result [::aiden::recipe::working]
+    list [dict get $result dose] [dict get $result yield] [dict get $result temperature] \
+        [dict get $result modified] [dict get [::aiden::recipe::state] draft] $::recipe_fixture::calls
+} -result {20.0 40.0 90.0 1 {} {}}
+
+test recipe-reset-1 {Reset restores profile settings and original global dose across successive commits} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply {dose 20 yield 40 temperature 90}
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply {dose 22 yield 44 temperature 91}
+} -body {
+    set frozen [::aiden::recipe::snapshot]
+    set result [::aiden::recipe::reset_adjustments]
+    list [dict get $result dose] [dict get $result yield] [dict get $result temperature] \
+        [dict get $result modified] [dict get $frozen dose] [dict get $frozen temperature] \
+        [dict get [::recipe_fixture::read $::aiden::recipe::state_file] working]
+} -result {18.0 36.0 88.0 0 22.0 91.0 {}}
+
+test recipe-choose-5 {Choosing another profile clears old overrides including its global dose} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::apply {dose 20 yield 40 temperature 90}
+    set frozen [::aiden::recipe::snapshot]
+    ::aiden::recipe::begin chooser
+} -body {
+    set result [::aiden::recipe::choose flow]
+    list [dict get $result profile_id] [dict get $result dose] [dict get $result yield] \
+        [dict get $result temperature] [dict get $result modified] [dict get $frozen profile_id] \
+        [dict get $frozen temperature]
+} -result {flow 18.0 42.0 92.0 0 gentle 90.0}
+
+test recipe-copy-1 {Save copy is a new native profile without implicit selection or draft dismissal} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+} -body {
+    set before [array get ::settings]
+    set source [::recipe_fixture::bytes [::recipe_fixture::path gentle]]
+    set record [::aiden::recipe::save_copy {My morning copy} {dose 20 yield 40 temperature 90}]
+    set copy [::recipe_fixture::read [dict get $record path]]
+    list [dict get $record id] [dict get $copy profile_title] [dict get $copy profile_grinder_dose_weight] \
+        [dict get $copy read_only] [::aiden::recipe::dict_equal $before [array get ::settings]] \
+        [expr {$source eq [::recipe_fixture::bytes [::recipe_fixture::path gentle]]}] \
+        $::recipe_fixture::calls [dict get [::aiden::recipe::state] scope] [file exists $::aiden::recipe::state_file]
+} -result {My_morning_copy {My morning copy} 20 0 1 1 {} editor 0}
+
+test recipe-copy-2 {Duplicate sanitized/case-insensitive names are rejected without overwrite} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::save_copy {My copy} {yield 40}
+} -body {
+    set before [::recipe_fixture::read [::recipe_fixture::path My_copy]]
+    set errors {}
+    foreach name {{My copy} {My? copy} {my COPY} gentle {} ../} {
+        lappend errors [catch {::aiden::recipe::save_copy $name {yield 50}}]
+    }
+    list $errors [::aiden::recipe::dict_equal $before [::recipe_fixture::read [::recipe_fixture::path My_copy]]] \
+        $::settings(profile_filename) $::recipe_fixture::calls
+} -result {{1 1 1 1 1 1} 1 gentle {}}
+
+test recipe-copy-3 {Explicitly selecting a saved copy uses its saved dose and clears old provenance} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    ::aiden::recipe::save_copy {Saved dose} {dose 20 yield 40 temperature 90}
+    ::aiden::recipe::begin chooser
+} -body {
+    set result [::aiden::recipe::choose Saved_dose]
+    list [dict get $result profile_id] [dict get $result dose] [dict get $result yield] [dict get $result temperature]
+} -result {Saved_dose 20.0 40.0 90.0}
+
+test recipe-favorite-1 {Favorites use separate local persistence without selecting/changing recipe} -setup {
+    ::recipe_fixture::setup
+} -body {
+    set before [array get ::settings]
+    ::aiden::recipe::favorite flow 1
+    set selected [lindex [::aiden::recipe::catalog {} favorites] 0]
+    ::aiden::recipe::configure -profile_dir [file join $::recipe_fixture::root profiles] \
+        -state_file [file join $::recipe_fixture::root aiden recipe-state.tcl]
+    list [dict get $selected id] [llength [::aiden::recipe::catalog {} favorites]] \
+        [::aiden::recipe::dict_equal $before [array get ::settings]] $::recipe_fixture::calls
+} -result {flow 1 1 {}}
+
+test recipe-fresh-1 {Changed raw profile or newly added script cannot pass an old preview} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+} -body {
+    set path [::recipe_fixture::path flow]
+    set data [::recipe_fixture::read $path]
+    dict set data advanced_shot_tcl {start_espresso}
+    ::recipe_fixture::write $path $data
+    list [catch {::aiden::recipe::choose flow}] $::recipe_fixture::calls $::settings(profile_filename)
+} -result {1 {} gentle}
+
+test recipe-fresh-2 {Symlink substitution is rejected before selecting a profile} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+    set target [file join $::recipe_fixture::root substituted.tcl]
+    file copy [::recipe_fixture::path flow] $target
+    file delete [::recipe_fixture::path flow]
+    file link -symbolic [::recipe_fixture::path flow] $target
+} -body {
+    list [catch {::aiden::recipe::choose flow}] $::recipe_fixture::calls
+} -result {1 {}}
+
+test recipe-fresh-3 {External working edits and source edits invalidate an adjustment draft} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    set ::settings(espresso_temperature) 89
+} -body {
+    list [catch {::aiden::recipe::apply {yield 40}}] $::recipe_fixture::calls $::settings(espresso_temperature)
+} -result {1 {} 89}
+
+test recipe-failure-1 {A silent native save failure is detected and never reported as a commit} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    set ::recipe_fixture::failure silent_save
+} -body {
+    set failed [catch {::aiden::recipe::apply {yield 40}} message]
+    set actual [::aiden::recipe::working]
+    list $failed [string match {*did not confirm*} $message] [dict get $actual yield] \
+        [dict get $actual modified] [file exists $::aiden::recipe::state_file] \
+        [lsearch -exact $::recipe_fixture::calls send_settings] [dict get [::aiden::recipe::state] scope]
+} -result {1 1 40.0 0 0 -1 {}}
+
+test recipe-failure-2 {A partial native selection reports actual state and preserves persisted provenance} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin chooser
+    set ::recipe_fixture::failure select
+} -body {
+    set failed [catch {::aiden::recipe::choose flow} message]
+    list $failed [dict get [::aiden::recipe::working] title] \
+        [file exists $::aiden::recipe::state_file] [llength [glob -nocomplain -directory [file dirname $::aiden::recipe::state_file] .aiden-*]]
+} -result {1 {Partial native recipe} 0 0}
+
+test recipe-failure-3 {Unwritable/missing persistence directory fails before native settings change} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::configure -state_file [file join $::recipe_fixture::root missing state.tcl]
+    ::aiden::recipe::begin
+} -body {
+    set before [array get ::settings]
+    list [catch {::aiden::recipe::apply {yield 40}}] \
+        [::aiden::recipe::dict_equal $before [array get ::settings]] $::recipe_fixture::calls
+} -result {1 1 {}}
+
+test recipe-fresh-4 {Numeric expression strings are rejected before native preview calculations} -setup {
+    ::recipe_fixture::setup
+    set raw [::recipe_fixture::read [::recipe_fixture::path flow]]
+    dict set raw espresso_hold_time {[start_espresso] + 5}
+    ::recipe_fixture::write [::recipe_fixture::path flow] $raw
+    rename ::profile::read_legacy ::profile::fixture_reader
+    proc ::profile::read_legacy {args} {
+        set ::recipe_fixture::reader_invoked 1
+        return [::profile::fixture_reader {*}$args]
+    }
+    unset -nocomplain ::recipe_fixture::reader_invoked
+} -body {
+    set row [::aiden::recipe::make_record flow [::recipe_fixture::path flow]]
+    list [dict get $row available] [dict get $row applyable] \
+        [info exists ::recipe_fixture::reader_invoked] [string match {*numeric profile field*} [dict get $row error]]
+} -cleanup {
+    rename ::profile::read_legacy {}
+    rename ::profile::fixture_reader ::profile::read_legacy
+} -result {0 0 0 1}
+
+test recipe-native-offset-1 {Synthetic negative offsets preserve stage structure, dose and source state} -setup {
+    ::recipe_fixture::setup
+} -body {
+    set before [array get ::settings]
+    set source_before [list [::recipe_fixture::bytes [::recipe_fixture::path gentle]] \
+        [::recipe_fixture::bytes [::recipe_fixture::path advanced]]]
+    set doses {}
+    set stage_fields_preserved 1
+    foreach id {gentle advanced} {
+        set native [::recipe_fixture::read [::recipe_fixture::path $id]]
+        dict set native grinder_dose_weight 35
+        set fields [::aiden::recipe::fields $native]
+        dict set fields temperature [expr {[dict get $fields temperature] - 1.5}]
+        set actual [::aiden::recipe::adjusted $native $fields]
+        if {$id eq "gentle"} {
+            set simple_temperatures {}
+            foreach key {espresso_temperature espresso_temperature_0 espresso_temperature_1 espresso_temperature_2 espresso_temperature_3} {
+                lappend simple_temperatures [dict get $actual $key]
+            }
+        } else {
+            set advanced_temperatures {}
+            foreach a [dict get $actual advanced_shot] b [dict get $native advanced_shot] {
+                lappend advanced_temperatures [dict get $a temperature]
+                if {![::aiden::recipe::dict_equal [dict remove $a temperature] [dict remove $b temperature]]} {
+                    set stage_fields_preserved 0
+                }
+            }
+        }
+        lappend doses [dict get $actual grinder_dose_weight]
+    }
+    set source_after [list [::recipe_fixture::bytes [::recipe_fixture::path gentle]] \
+        [::recipe_fixture::bytes [::recipe_fixture::path advanced]]]
+    list $simple_temperatures $advanced_temperatures $doses $stage_fields_preserved \
+        [::aiden::recipe::dict_equal $before [array get ::settings]] \
+        [expr {$source_before eq $source_after}] $::recipe_fixture::calls
+} -result {{86.5 86.5 85.5 84.5 83.5} {92.5 91.0 88.5} {35.0 35.0} 1 1 1 {}}
+
+test recipe-guard-4 {A native notice cannot commit a previously open Aiden recipe draft} -setup {
+    ::recipe_fixture::setup
+    ::aiden::recipe::begin
+    dict set ::recipe_fixture::status current_page tankempty
+    dict set ::recipe_fixture::status current_context tankempty
+    set ::de1(current_context) tankempty
+} -body {
+    list [catch {::aiden::recipe::apply {yield 40}}] $::recipe_fixture::calls
+} -result {1 {}}
+
+removeDirectory $::recipe_fixture::root
+cleanupTests

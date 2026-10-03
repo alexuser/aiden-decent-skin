@@ -1,0 +1,573 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Fake installed-core APIs only: no BLE, Tk, Android, or espresso machine.
+package require tcltest 2
+namespace import ::tcltest::*
+# An installed native app is optional source evidence, never a test dependency.
+# Public tests run without a private tablet snapshot. Opt in with a directory
+# containing history_viewer.tcl to verify the corresponding installed API.
+set native_history_reference {}
+if {[info exists ::env(AIDEN_NATIVE_REFERENCE)]} {
+    set native_history_reference [file join $::env(AIDEN_NATIVE_REFERENCE) history_viewer.tcl]
+}
+testConstraint nativeHistorySource [expr {$native_history_reference ne {} && [file readable $native_history_reference]}]
+namespace eval ::core_fixture {
+    variable calls {}
+    variable registrations {}
+    variable page aiden_home
+    variable finalizing 0
+    variable reporting 1
+    variable fail_action {}
+    variable vectors [dict create espresso_elapsed {0 1 2} espresso_pressure {0 4 NaN}]
+    variable pages {aiden_home off settings_1 settings_3 settings_4 extensions descale_prepare history_viewer}
+    variable legacy_pages {}
+    variable legacy_backgrounds {}
+    proc setup {} {
+        variable calls; set calls {}
+        variable registrations; set registrations {native_history_listener}
+        variable page; set page aiden_home
+        variable finalizing; set finalizing 0
+        variable reporting; set reporting 1
+        variable fail_action; set fail_action {}
+        variable vectors; set vectors [dict create espresso_elapsed {0 1 2} espresso_pressure {0 4 NaN}]
+        variable pages; set pages {aiden_home off settings_1 settings_3 settings_4 extensions descale_prepare history_viewer}
+        variable legacy_pages; set legacy_pages {}
+        variable legacy_backgrounds; set legacy_backgrounds {}
+        set ::android 1
+        set ::undroid 0
+        array unset ::settings
+        array set ::settings {profile_filename gentle profile_title {Gentle and sweet} \
+            settings_profile_type settings_2a grinder_dose_weight 18 final_desired_shot_weight 36 \
+            espresso_temperature 93 scale_bluetooth_address {} stress_test 0 \
+            start_espresso_only_if_scale_connected 0 ghc_is_installed 1 steam_timeout 30 steam_disabled 0 \
+            steam_temperature 150 espresso_clock 1000 history_saved 0 should_save_history 1}
+        array unset ::de1
+        array set ::de1 {state 2 substate 0 device_handle 11 scale_device_handle 22 \
+            current_context aiden_home scale_weight 0 head_temperature 92.7 \
+            steam_heater_temperature 145 in_eco_steam_mode 0 final_espresso_weight 0 \
+            current_frame_number 0 app_autostop_triggered False}
+        array unset ::timers
+        array set ::timers {espresso_start 0 espresso_stop 0}
+        array set ::de1_num_state {0 Sleep 1 GoingToSleep 2 Idle 4 Espresso 5 Steam 6 HotWater 11 FatalError 15 HotWaterRinse}
+        array set ::de1_substate_types {0 ready 1 heating 2 {final heating} 4 preinfusion 5 pouring 6 ending 200 Error_NaN}
+        unset -nocomplain ::idle_next_step ::settings_optional_callback ::currently_connecting_scale_handle
+        set ::aiden::core::hook_flags {}
+        set ::aiden::core::pending_request {}
+        set ::aiden::core::observed_operation {}
+        set ::aiden::core::completed_result {}
+        set ::aiden::core::last_state_event {}
+        set ::aiden::core::event_sequence 0
+    }
+    proc native_event {this sub previous old_sub time} {
+        foreach {num name} [array get ::de1_num_state] {
+            if {$name eq $this} {set ::de1(state) $num}
+        }
+        foreach {num name} [array get ::de1_substate_types] {
+            if {$name eq $sub} {set ::de1(substate) $num}
+        }
+        set event [dict create this_state $this this_substate $sub previous_state $previous \
+            previous_substate $old_sub event_time $time]
+        ::aiden::core::observe_state $event
+        return $event
+    }
+    proc flowing {} {
+        set ::timers(espresso_start) 1000000
+        set ::timers(espresso_stop) 0
+        native_event Espresso pouring Idle ready 1000.0
+    }
+    proc end_flow {} {
+        set ::timers(espresso_stop) 1031500
+        native_event Idle ready Espresso pouring 1031.5
+    }
+    proc complete {{saved 1}} {
+        set ::de1(final_espresso_weight) 42.7
+        set ::settings(history_saved) $saved
+        set ::settings(history_saved_shot_filename) [file join /history [clock format 1000 -format %Y%m%dT%H%M%S].shot]
+        ::aiden::core::observe_complete [dict create this_state Idle this_substate ready \
+            previous_state Espresso previous_substate pouring event_time 1031.5]
+    }
+}
+
+foreach name {start_espresso start_flush start_steam start_water start_idle start_sleep start_next_step ble_connect_to_scale} {
+    proc ::$name {} [format {
+        lappend ::core_fixture::calls %s
+        if {$::core_fixture::fail_action eq "%s"} {error {Transport outcome uncertain}}
+        return {}
+    } $name $name]
+}
+namespace eval ::device::scale {}
+proc ::device::scale::tare {} {lappend ::core_fixture::calls tare}
+proc ::device::scale::is_reporting {} {return $::core_fixture::reporting}
+namespace eval ::de1::event::apply {}
+proc ::de1::event::apply::after_flow_complete_is_pending {} {return $::core_fixture::finalizing}
+namespace eval ::de1::event::listener {}
+foreach name {on_all_state_change_add on_disconnect_add after_flow_complete_add} {
+    proc ::de1::event::listener::$name {args} [format {
+        lappend ::core_fixture::registrations [list %s {*}$args]
+    } $name]
+}
+proc ::dui {args} {
+    if {$args eq {canvas}} {return ::core_fixture::canvas}
+    switch -- [lrange $args 0 1] {
+        {page current} {return $::core_fixture::page}
+        {page exists} {return [expr {[lindex $args 2] in $::core_fixture::pages}]}
+        {page items} {
+            if {[lindex $args 2] in $::core_fixture::legacy_pages} {return {101 202}}
+            return {}
+        }
+        {page load} {
+            lappend ::core_fixture::calls [list navigation [lindex $args 2]]
+            set ::core_fixture::page [lindex $args 2]
+            set ::de1(current_context) $::core_fixture::page
+            return
+        }
+        default {error "Unexpected DUI call: $args"}
+    }
+}
+proc ::core_fixture::canvas {args} {
+    if {[lrange $args 0 1] ne {find withtag}} {error {Canvas read-only fence}}
+    if {[lindex $args 2] in $::core_fixture::legacy_backgrounds} {return 303}
+    return {}
+}
+proc ::backup_settings {} {lappend ::core_fixture::calls native_backup}
+proc ::fill_extensions_listbox {} {lappend ::core_fixture::calls native_extensions_catalog}
+namespace eval ::plugins::DYE {}
+proc ::plugins::DYE::open {args} {lappend ::core_fixture::calls [list dye {*}$args]}
+foreach name {espresso_elapsed espresso_pressure} {
+    proc ::$name {operation first last} [format {
+        if {$operation ne "range"} {error {Read-only vector fence}}
+        return [dict get $::core_fixture::vectors %s]
+    } $name]
+}
+foreach name {page_show show_settings start_button_ready watertemp steamtemp pressure waterflow waterweight_text save_this_espresso_to_history de1_send_state} {
+    proc ::$name {args} {error {HARDWARE / MUTATING DISPLAY HELPER FENCE}}
+}
+set before_source_calls $::core_fixture::calls
+set before_source_registrations $::core_fixture::registrations
+source [file join [file dirname [info script]] .. core.tcl]
+
+test source-1 {Sourcing does not dispatch, register listeners, or touch app state} -body {
+    list [expr {$before_source_calls eq $::core_fixture::calls}] \
+        [expr {$before_source_registrations eq $::core_fixture::registrations}] [info exists ::de1]
+} -result {1 1 0}
+
+test snapshot-1 {Read-only snapshot preserves native settings/timers and zero sensor reading} -setup {
+    ::core_fixture::setup
+} -body {
+    set before [list [lsort [array get ::de1]] [lsort [array get ::settings]] [lsort [array get ::timers]]]
+    set s [::aiden::core::snapshot]
+    set after [list [lsort [array get ::de1]] [lsort [array get ::settings]] [lsort [array get ::timers]]]
+    list [expr {$before eq $after}] $::core_fixture::calls $::core_fixture::registrations \
+        [dict get $s native_state] [dict get $s ready] [dict get $s elapsed] [dict get $s weight] \
+        [dict get $s graph_samples]
+} -result {1 {} native_history_listener Idle 1 {} 0 {}}
+
+test snapshot-2 {Absent connection/state/sensor fields remain unknown with unavailable values} -setup {
+    ::core_fixture::setup
+    array unset ::de1
+    array unset ::settings
+} -body {
+    set s [::aiden::core::snapshot]
+    list [dict get $s state] [dict get $s connection_status] [dict get $s connected] \
+        [dict get $s ready] [dict get $s editable] [dict get $s scale_status] \
+        [dict get $s weight] [dict get $s temperature] [dict get $s flow_ended] $::core_fixture::calls
+} -result {unknown unknown 0 0 0 unknown {} {} 0 {}}
+
+test connection-1 {Native opaque BLE handles and nonzero numeric handles permit current read-only telemetry} -setup {
+    ::core_fixture::setup
+    set ::settings(scale_bluetooth_address) scale-configured
+} -body {
+    set results {}
+    foreach handle {ble#DE1-opaque ble#scale-opaque -7 11} {
+        set ::de1(device_handle) $handle
+        set ::de1(scale_device_handle) $handle
+        set before [list [lsort [array get ::de1]] [lsort [array get ::settings]]]
+        set s [::aiden::core::snapshot]
+        set after [list [lsort [array get ::de1]] [lsort [array get ::settings]]]
+        lappend results [list [dict get $s connected] [dict get $s connection_status] \
+            [dict get $s ready] [dict get $s scale_connected] [dict get $s weight] [expr {$before eq $after}]]
+    }
+    list $results $::core_fixture::calls
+} -result {{{1 connected 1 1 0 1} {1 connected 1 1 0 1} {1 connected 1 1 0 1} {1 connected 1 1 0 1}} {}}
+
+test connection-2 {Native zero is disconnected; empty or absent handles remain unknown and block commands} -setup {
+    ::core_fixture::setup
+    set ::settings(scale_bluetooth_address) scale-configured
+} -body {
+    set results {}
+    foreach handle {0 0.0 {}} {
+        set ::de1(device_handle) $handle
+        set ::de1(scale_device_handle) $handle
+        set s [::aiden::core::snapshot]
+        lappend results [list [dict get $s connected] [dict get $s connection_status] \
+            [dict get $s scale_connected] [dict get $s scale_status] \
+            [dict get $s ready] [catch {::aiden::core::command stop}]]
+    }
+    unset ::de1(device_handle) ::de1(scale_device_handle)
+    set s [::aiden::core::snapshot]
+    lappend results [list [dict get $s connected] [dict get $s connection_status] \
+        [dict get $s scale_connected] [dict get $s scale_status] \
+        [dict get $s ready] [catch {::aiden::core::command stop}]]
+    list $results $::core_fixture::calls
+} -result {{{0 disconnected 0 disconnected 0 1} {0 disconnected 0 disconnected 0 1} {0 unknown 0 unknown 0 1} {0 unknown 0 unknown 0 1}} {}}
+
+test connection-3 {DE1 sentinel one is blocked on Android and qualified as simulation only for explicit desktop runtime} -setup {
+    ::core_fixture::setup
+    set ::de1(device_handle) 1
+} -body {
+    set android_snapshot [::aiden::core::snapshot]
+    set refused [catch {::aiden::core::command start espresso}]
+    set ::android 0
+    set desktop [::aiden::core::snapshot]
+    unset ::android
+    set unspecified [::aiden::core::snapshot]
+    list [dict get $android_snapshot connected] [dict get $android_snapshot connection_status] $refused \
+        [dict get $desktop connected] [dict get $desktop connection_status] \
+        [dict get $unspecified connected] [dict get $unspecified connection_status] $::core_fixture::calls
+} -result {0 unknown 1 1 simulated 0 unknown {}}
+
+test snapshot-3 {Steam telemetry cannot reuse the previous Espresso vector trace} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 5
+    set ::de1(substate) 5
+} -body {
+    set s [::aiden::core::snapshot]
+    list [dict get $s mode] [dict get $s temperature] [dict get $s graph_vectors] [dict get $s graph_samples]
+} -result {steam 145 {} {}}
+
+test snapshot-4 {A native error is an explicit fault, never Ready} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 11
+    set ::de1(substate) 200
+} -body {
+    set s [::aiden::core::snapshot]
+    list [dict get $s faulted] [dict get $s fault] [dict get $s ready] [dict get $s editable] $::core_fixture::calls
+} -result {1 Error_NaN 0 0 {}}
+
+test scale-1 {Stale/disconnected readings are qualified last-known values, never current zero} -setup {
+    ::core_fixture::setup
+    set ::settings(scale_bluetooth_address) scale-configured
+    set ::de1(scale_weight) 23.4
+    set ::core_fixture::reporting 0
+} -body {
+    set stale [::aiden::core::snapshot]
+    set ::de1(scale_device_handle) 0
+    set disconnected [::aiden::core::snapshot]
+    list [dict get $stale scale_status] [dict get $stale weight] [dict get $stale last_known_weight] \
+        [dict get $disconnected scale_status] [dict get $disconnected weight] $::core_fixture::calls
+} -result {stale {} 23.4 disconnected {} {}}
+
+test commands-1 {A Start request does not invent flowing state or an elapsed timer; duplicates are blocked} -setup {
+    ::core_fixture::setup
+} -body {
+    set r [::aiden::core::command start espresso]
+    set s [::aiden::core::snapshot]
+    list [dict get $r confirmed] [dict get $r status] [dict get $s state] [dict get $s flow_confirmed] \
+        [dict get $s elapsed] [dict get $s pending] [catch {::aiden::core::command start espresso}] $::core_fixture::calls
+} -result {0 requested idle 0 {} start 1 start_espresso}
+
+test commands-2 {Stop requests native Idle but current flow stays unconfirmed-ended until a native event} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+} -body {
+    set r [::aiden::core::command stop]
+    set s [::aiden::core::snapshot]
+    list [dict get $r confirmed] [dict get $s state] [dict get $s flow_confirmed] \
+        [dict get $s flow_ended] [dict get $s pending] $::core_fixture::calls
+} -result {0 espresso 1 0 stop start_idle}
+
+test commands-3 {Lost machine connection cannot invoke start_idle's fabricated Idle/reconnect branch} -setup {
+    ::core_fixture::setup
+    set ::de1(device_handle) 0
+} -body {
+    list [catch {::aiden::core::command stop}] [catch {::aiden::core::command start espresso}] $::core_fixture::calls
+} -result {1 1 {}}
+
+test commands-4 {A failed dispatch keeps request uncertainty and does not reset native state} -setup {
+    ::core_fixture::setup
+    set ::core_fixture::fail_action start_espresso
+} -body {
+    set failed [catch {::aiden::core::command start espresso}]
+    set s [::aiden::core::snapshot]
+    list $failed [dict get $s pending_request status] [dict get $s native_state] [dict get $s flow_confirmed] [dict get $s editable]
+} -result {1 uncertain Idle 0 0}
+
+test commands-5 {Scale-only Espresso policy and steam heating/disabled policies are retained} -setup {
+    ::core_fixture::setup
+    set ::settings(start_espresso_only_if_scale_connected) 1
+    set ::settings(scale_bluetooth_address) scale-configured
+    set ::de1(scale_device_handle) 0
+    set ::de1(steam_heater_temperature) 120
+} -body {
+    set s [::aiden::core::snapshot]
+    list [dict get $s can_start_by_mode espresso] [dict get $s can_start_by_mode steam] \
+        [dict get $s can_start_by_mode water] [catch {::aiden::core::command start espresso}] \
+        [catch {::aiden::core::command start steam}] $::core_fixture::calls
+} -result {0 0 1 1 1 {}}
+
+test commands-6 {Tare/reconnect/advance and Sleep/Wake each require a distinct explicit action} -setup {
+    ::core_fixture::setup
+} -body {
+    ::aiden::core::command tare
+    set ::settings(scale_bluetooth_address) scale-configured
+    set ::de1(scale_device_handle) 0
+    ::aiden::core::command reconnect_scale
+    ::core_fixture::flowing
+    ::aiden::core::command advance
+    ::core_fixture::end_flow
+    ::aiden::core::command sleep
+    ::core_fixture::native_event Sleep ready Idle ready 1032
+    ::aiden::core::command wake
+    list $::core_fixture::calls [dict get [::aiden::core::snapshot] native_state]
+} -result {{tare ble_connect_to_scale start_next_step start_sleep start_idle} Sleep}
+
+test commands-7 {Native group-head start policy is retained and a request is never flow confirmation} -setup {
+    ::core_fixture::setup
+    set ::settings(ghc_is_installed) 7
+} -body {
+    set s [::aiden::core::snapshot]
+    set request [::aiden::core::command start espresso]
+    list [dict get $s ghc_policy_verified] [dict get $s start_requires_group_head] \
+        [expr {[dict get $s start_instruction] ne {}}] [dict get $request requires_group_head] \
+        [dict get [::aiden::core::snapshot] flow_confirmed] $::core_fixture::calls
+} -result {1 1 1 1 0 start_espresso}
+
+test events-1 {Appending observers preserves native history listener and is idempotent} -setup {
+    ::core_fixture::setup
+} -body {
+    ::aiden::core::install_event_hooks
+    ::aiden::core::install_event_hooks
+    list [llength $::core_fixture::registrations] [lindex $::core_fixture::registrations 0] \
+        $::core_fixture::calls [lindex $::core_fixture::registrations end]
+} -result {4 native_history_listener {} {after_flow_complete_add ::aiden::core::observe_complete}}
+
+test events-2 {Flow ends at native stop timer; completion and history remain separate} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+} -body {
+    ::core_fixture::end_flow
+    set ended [::aiden::core::snapshot]
+    set ::de1(scale_weight) 41.2
+    set settling [::aiden::core::snapshot]
+    ::core_fixture::complete
+    set final [::aiden::core::snapshot]
+    list [dict get $ended flow_ended] [dict get $ended result_finalized] [dict get $settling elapsed] \
+        [dict get $settling weight] [dict get $final result_finalized] [dict get $final result_saved] \
+        [dict get $final final_weight] [dict get $final final_weight_quality] $::core_fixture::calls
+} -result {1 0 31.5 41.2 1 1 42.7 native_final_estimate {}}
+
+test events-3 {No scale/final save confirmation remains unavailable/Unsaved without fabricating a record} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    set ::de1(scale_device_handle) 0
+} -body {
+    ::core_fixture::complete 0
+    set s [::aiden::core::snapshot]
+    list [dict get $s result_finalized] [dict get $s result_saved] [dict get $s final_weight] \
+        [dict get $s final_weight_quality] [dict get $s history_id] [expr {[dict get $s save_error] ne {}}] $::core_fixture::calls
+} -result {1 0 {} unavailable {} 1 {}}
+
+test events-4 {Native completion alone cannot fabricate flow-ended identity} -setup {
+    ::core_fixture::setup
+} -body {
+    ::core_fixture::complete
+    set s [::aiden::core::snapshot]
+    list [dict get $s flow_ended] [dict get $s result_finalized] [dict get $s result_saved] [dict get $s operation_id]
+} -result {0 0 0 {}}
+
+test events-5 {Final graph and recipe are immutable copies of observed native samples/identity} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+} -body {
+    set ::settings(profile_title) {Next recipe}
+    set ::settings(grinder_dose_weight) 20
+    dict set ::core_fixture::vectors espresso_pressure {1 2 3}
+    set r [dict get [::aiden::core::snapshot] final_result]
+    list [dict get $r recipe profile_title] [dict get $r recipe dose] [dict get $r graph_samples pressure]
+} -result {{Gentle and sweet} 18 {0 4 NaN}}
+
+test events-6 {A default True autostop flag is not normal completion evidence} -setup {
+    ::core_fixture::setup
+    set ::de1(app_autostop_triggered) True
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+} -body {dict get [::aiden::core::snapshot] outcome} -result unknown
+
+test events-7 {A native false-to-true SAV/SAW transition qualifies normal completion only after finalization} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    set ::de1(app_autostop_triggered) True
+    ::core_fixture::end_flow
+} -body {
+    set before [dict get [::aiden::core::snapshot] outcome]
+    ::core_fixture::complete
+    set final [::aiden::core::snapshot]
+    list $before [dict get $final outcome] [dict get $final stop_reason]
+} -result {unknown normal native_app_autostop}
+
+test events-8 {Operator Stop cancels normal-completion classification even if native autostop also fired} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    ::aiden::core::command stop
+    set ::de1(app_autostop_triggered) True
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+} -body {
+    set final [::aiden::core::snapshot]
+    list [dict get $final outcome] [dict get $final stop_reason]
+} -result {unknown operator_request}
+
+test events-9 {A new pending Start cannot consume the retained previous result as its completion} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+} -body {
+    ::aiden::core::command start espresso
+    set pending [::aiden::core::snapshot]
+    ::aiden::core::command stop
+    set stopped [::aiden::core::snapshot]
+    list [dict get $pending pending] [dict get $pending operation_id] [dict get $pending flow_ended] \
+        [dict get $pending result_finalized] [dict get $pending operation_recipe] \
+        [dict get $stopped pending] [dict get $stopped result_finalized]
+} -result {start {} 0 0 {} stop 0}
+
+test events-10 {Observed operation snapshot carries its frozen native advanced recipe fields} -setup {
+    ::core_fixture::setup
+    set ::settings(advanced_shot) {{name first temperature 93} {name last temperature 91}}
+    ::core_fixture::flowing
+} -body {
+    set ::settings(profile_title) {Changed externally}
+    set recipe [dict get [::aiden::core::snapshot] operation_recipe]
+    list [dict get $recipe profile_title] [dict get $recipe advanced_shot]
+} -result {{Gentle and sweet} {{name first temperature 93} {name last temperature 91}}}
+
+test routing-1 {Native page navigation avoids page_show's machine user-present side effect} -setup {
+    ::core_fixture::setup
+} -body {
+    set before [lsort [array get ::settings]]
+    set r [::aiden::core::route descale]
+    list [dict get $r page] $::core_fixture::calls [expr {$before eq [lsort [array get ::settings]]}]
+} -result {descale_prepare {native_backup {navigation descale_prepare}} 1}
+
+test routing-2 {Read-only native utilities open while asleep without waking or declaring editable} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 0
+} -body {
+    set before [dict get [::aiden::core::snapshot] editable]
+    ::aiden::core::route history
+    list $before $::de1(state) $::core_fixture::calls
+} -result {0 0 {{navigation history_viewer}}}
+
+test routing-3 {Active, unknown, interrupted or stress-test routes are blocked without physical calls} -setup {
+    ::core_fixture::setup
+} -body {
+    set ::de1(state) 4
+    set active [catch {::aiden::core::route maintenance}]
+    set ::de1(state) 2
+    set ::settings(stress_test) 1
+    set stress [catch {::aiden::core::route settings}]
+    set ::settings(stress_test) 0
+    set ::de1(current_context) tankempty
+    set interrupt [catch {::aiden::core::route original}]
+    list $active $stress $interrupt $::core_fixture::calls
+} -result {1 1 1 {}}
+
+test routing-4 {Unavailable workflow/calibration is explicit; verified DYE open is navigation} -setup {
+    ::core_fixture::setup
+} -body {
+    set workflow [catch {::aiden::core::route workflow}]
+    set calibration [catch {::aiden::core::route calibration}]
+    ::aiden::core::route dye
+    list $workflow $calibration $::core_fixture::calls
+} -result {1 1 {{dye -which_shot last}}}
+
+test routing-5 {Offline native Device settings permit explicit reconnection setup without inventing Idle} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 0
+    set ::de1(device_handle) 0
+} -body {
+    ::aiden::core::route app
+    set s [::aiden::core::snapshot]
+    list [dict get $s native_state] [dict get $s connected] [dict get $s ready] $::core_fixture::calls
+} -result {Sleep 0 0 {native_backup {navigation settings_4}}}
+
+test routing-6 {An unresolved lost-flow observation blocks offline utility navigation} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    set ::de1(device_handle) 0
+    set ::de1(state) 0
+    ::aiden::core::observe_disconnect
+} -body {
+    list [catch {::aiden::core::route app}] $::core_fixture::calls
+} -result {1 {}}
+
+test routing-7 {Offline history viewing preserves Sleep/disconnected state and the working recipe} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 0
+    set ::de1(device_handle) 0
+} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::core::route history
+    set s [::aiden::core::snapshot]
+    list [dict get $s native_state] [dict get $s connected] [dict get $s ready] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::core_fixture::calls
+} -result {Sleep 0 0 1 {{navigation history_viewer}}}
+
+test routing-8 {Lost unresolved flow blocks offline history, preserving pending Stop context} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    set ::de1(device_handle) 0
+    set ::de1(state) 0
+    ::aiden::core::observe_disconnect
+} -body {
+    list [catch {::aiden::core::route history}] $::core_fixture::calls
+} -result {1 {}}
+
+test routing-10 {Offline original home uses direct native navigation without commands or fabricated Idle} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 0
+    set ::de1(device_handle) 0
+} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::core::route original
+    set s [::aiden::core::snapshot]
+    list [dict get $s native_state] [dict get $s connected] [dict get $s ready] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::core_fixture::calls
+} -result {Sleep 0 0 1 {{navigation off}}}
+
+test routing-11 {Legacy native home is verified by exact DUI page items without a declared background marker} -setup {
+    ::core_fixture::setup
+    set ::de1(state) 0
+    set ::de1(device_handle) 0
+    set ::core_fixture::pages [lsearch -all -inline -not -exact $::core_fixture::pages off]
+    set ::core_fixture::legacy_pages off
+} -body {
+    set verified [::aiden::core::native_page_exists off]
+    ::aiden::core::route original
+    list $verified [::aiden::core::native_page_exists absent] \
+        [::aiden::core::native_page_exists {off||all}] $::core_fixture::calls
+} -result {1 0 0 {{navigation off}}}
+
+test routing-12 {Native saver background is detected through its exact legacy page tag without creating UI or commands} -setup {
+    ::core_fixture::setup
+    set ::core_fixture::legacy_backgrounds saver
+} -body {
+    list [::aiden::core::native_page_exists saver] [::aiden::core::native_page_exists absent] \
+        [::aiden::core::native_page_exists {saver||all}] $::core_fixture::calls
+} -result {1 0 0 {}}
+
+test routing-9 {Optional native history open is direct DUI navigation; it does not rerun its vector initializer} -constraints nativeHistorySource -setup {
+    set history_probe [interp create]
+    $history_probe eval {set nav {}; proc ::dui {args} {lappend ::nav $args}}
+    $history_probe eval [list source [file normalize $native_history_reference]]
+} -body {
+    $history_probe eval {::history_viewer open; set nav}
+} -cleanup {
+    interp delete $history_probe
+} -result {{page load history_viewer}}
+
+cleanupTests

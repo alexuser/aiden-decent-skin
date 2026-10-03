@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-10-03T04:56:54.620003+00:00",
+  "release": "0.1.0-alpha.1",
+  "status": "developer preview; no live-operation or updater-survival validation",
+  "project_license": {
+    "spdx": "GPL-3.0-only",
+    "authorization": "Release owner authorized GPLv3 for new project code and project-owned icons on 2026-10-03",
+    "full_text": "COPYING",
+    "exceptions": [
+      "Inter fonts: OFL-1.1",
+      "Phosphor SVGs and derived PNGs: MIT"
+    ]
+  },
+  "components": [
+    {
+      "id": "aiden-runtime",
+      "scope": [
+        "aiden/*.tcl",
+        "synthetic tests",
+        "tools/*.py",
+        "project documentation"
+      ],
+      "bundled": true,
+      "license": "GPL-3.0-only",
+      "origin": "New Aiden integration/runtime using native de1app APIs; no installed source snapshot approved for redistribution",
+      "copyright": "Copyright (c) 2026 Aiden contributors.",
+      "notice": "NOTICE"
+    },
+    {
+      "id": "aiden-icons",
+      "scope": "assets/icons/aiden/*.svg and their PNG derivatives",
+      "bundled": true,
+      "license": "GPL-3.0-only",
+      "origin": "Project-owned icons identified by release owner",
+      "source_icon_count": 15,
+      "derived_png_count": 720,
+      "icons": [
+        "advance",
+        "apply",
+        "back",
+        "down",
+        "espresso",
+        "graph-options",
+        "history",
+        "play",
+        "reconnect",
+        "scale",
+        "search",
+        "steam",
+        "stop",
+        "tare",
+        "water"
+      ],
+      "notice": "assets/icons/aiden/LICENSE.txt"
+    },
+    {
+      "id": "phosphor-icons",
+      "scope": "assets/icons/phosphor/*.svg and their PNG derivatives",
+      "bundled": true,
+      "license": "MIT",
+      "origin": "14 imported regular Phosphor SVGs from approved design assets",
+      "upstream": "https://github.com/phosphor-icons/core",
+      "upstream_revision": "Not recorded; preserve exact local SVG hashes and verify a pinned revision before future asset updates",
+      "copyright": "Copyright (c) 2023 Phosphor Icons",
+      "source_icon_count": 14,
+      "derived_png_count": 672,
+      "icons": [
+        "arrow-counter-clockwise",
+        "arrow-right",
+        "arrows-out",
+        "bookmark-simple",
+        "check",
+        "gear-six",
+        "link",
+        "minus",
+        "moon",
+        "plus",
+        "shower",
+        "thermometer",
+        "warning-circle",
+        "x"
+      ],
+      "notices": [
+        "LICENSES/MIT-Phosphor.txt",
+        "assets/icons/phosphor/LICENSE.txt",
+        "aiden/ui-assets/PHOSPHOR-LICENSE.txt"
+      ],
+      "source_license_url": "https://raw.githubusercontent.com/phosphor-icons/core/main/LICENSE",
+      "redistribution_requirement": "Preserve full MIT copyright and permission notice with sources and raster derivatives"
+    },
+    {
+      "id": "inter-fonts",
+      "scope": "aiden/ui-assets/Inter-Regular.ttf and Inter-SemiBold.ttf",
+      "bundled": true,
+      "license": "OFL-1.1",
+      "upstream": "https://github.com/rsms/inter",
+      "upstream_revision": "0a5106e0b, embedded font version 3.019",
+      "copyright": "Copyright (c) 2016-2020 The Inter Project Authors. Embedded font tables identify 2020.",
+      "trademark": "Inter is trademark of Rasmus Andersson.",
+      "fonts": [
+        {
+          "file": "aiden/ui-assets/Inter-Regular.ttf",
+          "sha256": "eeab48280aacd4fc83c1c7e735681df9edd1b59588dde23d0339bcf6552fb788",
+          "version": "3.019;git-0a5106e0b",
+          "embedded_copyright": "Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)",
+          "modified": false
+        },
+        {
+          "file": "aiden/ui-assets/Inter-SemiBold.ttf",
+          "sha256": "f5595839debdb0d028116ed8a7579f31d1c2f712677a2e794459a5dce6eca929",
+          "version": "3.019;git-0a5106e0b",
+          "embedded_copyright": "Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)",
+          "modified": false
+        }
+      ],
+      "notices": [
+        "LICENSES/OFL-1.1.txt",
+        "aiden/ui-assets/INTER-OFL-1.1.txt"
+      ],
+      "source_license_url": "https://raw.githubusercontent.com/rsms/inter/0a5106e0b/LICENSE.txt",
+      "redistribution_requirement": "Keep fonts under OFL and retain full copyright/license; do not sell fonts alone; current files unchanged"
+    },
+    {
+      "id": "de1app",
+      "bundled": false,
+      "relationship": "Installed native application dependency",
+      "target_version": "1.46.1.1",
+      "upstream": "https://github.com/decentespresso/de1app",
+      "license_evidence": "Official root LICENSE contains GNU GPL version 3; do not infer an or-later grant from the license template",
+      "source_license_url": "https://github.com/decentespresso/de1app/blob/main/LICENSE",
+      "policy": "No APK, native source snapshot, configured launcher, firmware or settings included"
+    },
+    {
+      "id": "dsx2",
+      "bundled": false,
+      "relationship": "Installed skin dependency",
+      "target_version": "3.30",
+      "upstream": "https://github.com/decentespresso/DSx2",
+      "original_upstream": "https://github.com/Damian-AU/DSx2",
+      "license_evidence": "No explicit root license located in inspected upstream/fork; not assigning de1app license to the separate submodule",
+      "policy": "External installed prerequisite only; no DSx2 source, skin assets, private startup/end hook or package redistribution"
+    },
+    {
+      "id": "native-frameworks-and-plugins",
+      "bundled": false,
+      "relationship": "DUI/Tcl/Tk/BLT/native font and symbol providers, DYE/history/editor/maintenance routes supplied by installed application",
+      "policy": "No native package, library, plugin, fallback font or FontAwesome file included; separately inventory if bundling ever changes"
+    },
+    {
+      "id": "playwright",
+      "bundled": false,
+      "relationship": "Icon build tool",
+      "observed_and_pinned_package_version": "1.58.0",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/microsoft/playwright",
+      "source_license_url": "https://raw.githubusercontent.com/microsoft/playwright/v1.58.0/LICENSE",
+      "policy": "No tool binary or Chromium cache bundled; default Playwright launch with optional explicit AIDEN_CHROMIUM_EXECUTABLE"
+    },
+    {
+      "id": "pillow",
+      "bundled": false,
+      "relationship": "Icon resizing build tool",
+      "observed_and_pinned_package_version": "12.2.0",
+      "license": "MIT-CMU",
+      "upstream": "https://github.com/python-pillow/Pillow",
+      "source_license_url": "https://raw.githubusercontent.com/python-pillow/Pillow/12.2.0/LICENSE",
+      "policy": "No tool binary or virtual environment bundled"
+    }
+  ],
+  "full_license_texts": [
+    {
+      "file": "OFL-1.1.txt",
+      "source_url": "https://raw.githubusercontent.com/rsms/inter/0a5106e0b/LICENSE.txt",
+      "downloaded_utc": "2026-10-03T04:38:41.815472+00:00",
+      "sha256": "4d7d9c95e7d7f2f0ebf76d5e0b344826b74e903a34028ee18ab54bb639e45906",
+      "bytes": 4426,
+      "unchanged_upstream_text": true
+    },
+    {
+      "file": "GPL-3.0-only.txt",
+      "source_url": "https://raw.githubusercontent.com/decentespresso/de1app/main/LICENSE",
+      "downloaded_utc": "2026-10-03T04:38:42.120949+00:00",
+      "sha256": "2ca9503d76d1ffab14f599b4741382eec11face60ad1f0d7a41897809003a286",
+      "bytes": 34470,
+      "unchanged_upstream_text": true
+    },
+    {
+      "file": "MIT-Phosphor.txt",
+      "source_url": "https://raw.githubusercontent.com/phosphor-icons/core/main/LICENSE",
+      "downloaded_utc": "2026-10-03T04:38:42.354670+00:00",
+      "sha256": "b5b1f1da112d18ea2147decfd48ddc1bf2b5aeb6c265381579340e95b15a2bb2",
+      "bytes": 1071,
+      "unchanged_upstream_text": true
+    }
+  ],
+  "privacy_policy": {
+    "default": "deny all files outside exact allowlist",
+    "excluded": [
+      "device backups",
+      "settings snapshots",
+      "installed profile definitions and catalogs",
+      "personal shot history",
+      "serial/MAC identifiers and credentials",
+      "device captures/screenshots",
+      "private audit/source snapshots",
+      "configured launchers",
+      "existing installation archives/manifests",
+      "runtime state and logs",
+      "browser caches and virtual environments"
+    ]
+  },
+  "remaining_gates": [
+    "final wrapper and clean-checkout tests",
+    "final source/archive exact-file and SHA256 verification",
+    "attended live flow/Stop/scale/GHC/handoff/history validation",
+    "recipient-data-preserving installation/removal tests",
+    "updater-survival tests",
+    "record/pin exact Phosphor revision and rebuild environment for future asset updates"
+  ]
+}

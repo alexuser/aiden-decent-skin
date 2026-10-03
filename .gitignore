@@ -1,0 +1,13 @@
+dist/
+__pycache__/
+.DS_Store
+settings/
+startup-error.txt
+aiden/enabled
+aiden/reduce-motion
+aiden/*-state.tcl
+aiden/*-error.txt
+aiden/boot-ok.txt
+aiden/status.tcl
+*.tdb
+*.log

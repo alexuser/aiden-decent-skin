@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: GPL-3.0-only
+package require tcltest 2
+namespace import ::tcltest::*
+set root [file normalize [file join [file dirname [info script]] ..]]
+namespace eval ::aiden {variable root [file join [::tcltest::temporaryDirectory] aiden-controller-[pid]]}
+file mkdir $::aiden::root
+source [file join $root lifecycle.tcl]
+source [file join $root app.tcl]
+namespace eval ::fixture {variable calls {}; variable screen aiden_home; variable state {}; variable recipes 0}
+namespace eval ::aiden::core {
+    proc snapshot {} {return $::fixture::state}
+    proc install_event_hooks {} {lappend ::fixture::calls observers}
+    proc command {args} {lappend ::fixture::calls [linsert $args 0 command]}
+    proc route {target} {
+        lappend ::fixture::calls [list route $target]
+        dict set ::fixture::state current_page off
+        set ::fixture::screen off
+    }
+}
+namespace eval ::aiden::recipe {
+    proc configure {args} {}
+    proc working {} {return {title {Full profile name} dose 18 yield 36 temperature 93}}
+    proc begin {kind} {return {dose 18 yield 36 temperature 93}}
+    proc cancel {} {lappend ::fixture::calls cancel}
+    proc catalog {} {return {}}
+}
+namespace eval ::aiden::modes {
+    proc configure {args} {}
+    proc get {mode} {return {fields {}}}
+    proc workflow {action args} {return {selected espresso workflows {espresso {order espresso skipped {}}}}}
+}
+namespace eval ::aiden::ui {
+    proc mount {} {lappend ::fixture::calls mount}
+    proc mount_native_return {page} {}
+    proc mount_pending_stop {page} {}
+    proc set_reduced_motion {value} {}
+    proc show {page} {set ::fixture::screen $page}
+    proc render {snapshot} {set ::fixture::rendered $snapshot}
+    proc set_catalog {value} {}
+    proc set_recipe {value} {}
+}
+proc homedir {} {return /tmp}
+proc dui {args} {return $::fixture::screen}
+proc skins_page_change_due_to_de1_state_change {state} {lappend ::fixture::calls [list native_state $state]}
+proc reset_fixture {{state idle}} {
+    set ::fixture::calls {}
+    set ::fixture::screen aiden_home
+    set ::aiden::app::native_view 0
+    set ::aiden::app::notice {}
+    set native [expr {$state eq "sleep" ? "Sleep" : "Idle"}]
+    set ready [expr {$state eq "idle"}]
+    set ::fixture::state [dict create state $state native_state $native native_substate ready connected 1 \
+        pending {} editable $ready ready $ready scale_connected 0 weight {} temperature 90 \
+        profile_title {Full profile name} dose 18 target_yield 36 target_temp 93 \
+        start_verified 1 can_start_by_mode [dict create espresso $ready flush $ready steam $ready water $ready] \
+        graph_vectors {} scale_status disconnected current_page aiden_home context_verified 1]
+    ::aiden::lifecycle::reset
+    ::aiden::app::sample
+}
+test boot-no-actuation-1 {Boot only mounts and observes; never wakes or starts} -body {
+    reset_fixture sleep
+    ::aiden::app::boot
+    list $::fixture::calls [dict get $::fixture::rendered primary_action]
+} -result {{observers mount} wake}
+test navigation-1 {Changing modes only prepares one} -body {
+    reset_fixture
+    ::aiden::app::action mode steam
+    list $::fixture::calls [dict get $::fixture::rendered mode]
+} -result {{} steam}
+test navigation-2 {Opening and canceling profiles never starts or applies} -body {
+    reset_fixture
+    ::aiden::app::action profiles
+    ::aiden::app::action profile_cancel
+    list $::fixture::calls $::fixture::screen
+} -result {cancel aiden_home}
+test explicit-wake-1 {Wake dispatches only after explicit primary tap} -body {
+    reset_fixture sleep
+    ::aiden::app::action primary
+    set ::fixture::calls
+} -result {{command wake}}
+test explicit-start-1 {Explicit Start sends the selected physical mode} -body {
+    reset_fixture
+    ::aiden::app::action mode water
+    ::aiden::app::action primary
+    set ::fixture::calls
+} -result {{command start water}}
+test safe-route-1 {Original UI route enables native presentation} -body {
+    reset_fixture
+    ::aiden::app::action original_skin
+    list $::fixture::calls $::aiden::app::native_view
+} -result {{{route original}} 1}
+test preserve-alert-1 {Native safety state remains native} -body {
+    reset_fixture
+    ::aiden::app::state_change Refill
+    set ::fixture::calls
+} -result {{native_state Refill}}
+test unknown-action-1 {Unknown UI command is reported, never sent} -body {
+    reset_fixture
+    ::aiden::app::action unexpected
+    list $::fixture::calls $::aiden::app::notice
+} -result {{} {Unsupported Aiden action: unexpected}}
+test no-sensor-zero-1 {Missing scale data stays empty} -body {
+    reset_fixture
+    set s [::aiden::app::sample]
+    list [dict get $s weight] [dict get $s scale weight]
+} -result {{} {}}
+test native-return-1 {Returning from native history restores Aiden presentation ownership} -body {
+    reset_fixture
+    set ::aiden::app::native_view 1
+    ::aiden::app::sample
+    set ::aiden::app::native_view
+} -result 0
+namespace eval ::aiden::distribution {
+    proc boot_success {} {lappend ::fixture::calls boot_success}
+    proc boot_failure {problem options} {lappend ::fixture::calls [list boot_failure $problem]}
+}
+test standalone-boot-success-1 {Standalone is acknowledged only after mounting and rendering} -body {
+    reset_fixture
+    set ::aiden::standalone 1
+    set ::aiden::app::started 0
+    ::aiden::app::boot
+    list [lindex $::fixture::calls end] $::aiden::app::started
+} -result {boot_success 1}
+test standalone-boot-failure-1 {Asynchronous mount failure reaches standalone recovery without actuation} -body {
+    reset_fixture
+    set ::aiden::app::started 0
+    rename ::aiden::ui::mount ::aiden::ui::original_mount
+    proc ::aiden::ui::mount {} {error {synthetic mount failure}}
+    ::aiden::app::boot
+    rename ::aiden::ui::mount {}
+    rename ::aiden::ui::original_mount ::aiden::ui::mount
+    list $::fixture::calls $::aiden::app::started $::aiden::app::timer
+} -result {{observers {boot_failure {synthetic mount failure}}} 0 {}}
+unset ::aiden::standalone
+test standalone-module-failure-1 {Standalone module errors escape bootstrap for loader recovery} -body {
+    set dir [makeDirectory aiden-bootstrap-failure]
+    file copy -force [file join $root bootstrap.tcl] [file join $dir bootstrap.tcl]
+    set fd [open [file join $dir core.tcl] w]
+    puts $fd {error {synthetic module failure}}
+    close $fd
+    set child [interp create]
+    $child eval {namespace eval ::aiden {variable standalone 1}}
+    set code [catch {$child eval [list source [file join $dir bootstrap.tcl]]} problem]
+    interp delete $child
+    removeDirectory $dir
+    list $code $problem
+} -result {1 {synthetic module failure}}
+after cancel $::aiden::app::timer
+if {$::aiden::app::hold_timer ne {}} {after cancel $::aiden::app::hold_timer}
+cleanupTests

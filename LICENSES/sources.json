@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "licenses": [
+    {
+      "file": "OFL-1.1.txt",
+      "source_url": "https://raw.githubusercontent.com/rsms/inter/0a5106e0b/LICENSE.txt",
+      "downloaded_utc": "2026-10-03T04:38:41.815472+00:00",
+      "sha256": "4d7d9c95e7d7f2f0ebf76d5e0b344826b74e903a34028ee18ab54bb639e45906",
+      "bytes": 4426,
+      "unchanged_upstream_text": true
+    },
+    {
+      "file": "GPL-3.0-only.txt",
+      "source_url": "https://raw.githubusercontent.com/decentespresso/de1app/main/LICENSE",
+      "downloaded_utc": "2026-10-03T04:38:42.120949+00:00",
+      "sha256": "2ca9503d76d1ffab14f599b4741382eec11face60ad1f0d7a41897809003a286",
+      "bytes": 34470,
+      "unchanged_upstream_text": true
+    },
+    {
+      "file": "MIT-Phosphor.txt",
+      "source_url": "https://raw.githubusercontent.com/phosphor-icons/core/main/LICENSE",
+      "downloaded_utc": "2026-10-03T04:38:42.354670+00:00",
+      "sha256": "b5b1f1da112d18ea2147decfd48ddc1bf2b5aeb6c265381579340e95b15a2bb2",
+      "bytes": 1071,
+      "unchanged_upstream_text": true
+    }
+  ]
+}

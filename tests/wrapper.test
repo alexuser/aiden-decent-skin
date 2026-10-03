@@ -1,0 +1,282 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Synthetic installed library only; no Tk, BLE, tablet, or private audit source.
+package require tcltest 2
+package require sha256
+namespace import ::tcltest::*
+
+namespace eval ::wrapper_fixture {
+    variable wrapper_dir [file normalize [file join [file dirname [info script]] ..]]
+    variable root {}
+    variable probe {}
+    variable serial 0
+    proc write {path text} {
+        file mkdir [file dirname $path]
+        set fd [open $path wb]
+        puts -nonewline $fd $text
+        close $fd
+    }
+    proc setup {} {
+        variable root; variable probe; variable serial; variable wrapper_dir
+        incr serial
+        set root [makeDirectory "aiden wrapper [pid] $serial"]
+        set app [file join $root {relocated app with spaces}]
+        set skin [file join $app skins Aiden]
+        set dependency [file join $app skins DSx2]
+        file mkdir $skin
+        foreach filename {skin.tcl compat.tcl preflight.tcl} {
+            file copy [file join $wrapper_dir $filename] [file join $skin $filename]
+        }
+        set code {
+set ::skin_version 3.30
+if {[file exists [skin_directory]/pages/cafe/graphs.tcl]} {
+    file delete -force [skin_directory]/pages/cafe/graphs.tcl
+}
+if {$::skin(colour_theme_folder) == "default"} {
+    set ::skin(colour_theme_folder) [skin_directory]/colour_themes
+}
+proc create_settings_dir {} {file mkdir [skin_directory]/settings}
+create_settings_dir
+proc skin_font {name} {return [skin_directory]/fonts/$name}
+proc check_app_extensions {} {
+    save_settings
+    file copy [skin_directory]/code/slow_scale_filtering [homedir]/plugins/slow_scale_filtering
+}
+proc skin_negative_scale_tare {} {scale_tare}
+::register_state_change_handler Sleep Idle skin_load_fav
+skin_negative_scale_tare
+if {0} {
+    if {[file exists "[skin_directory]/plugins/steam_elapsed_timer.tcl"] == 1} {
+        file rename -force [skin_directory]/plugins/steam_elapsed_timer.tcl [skin_directory]/plugins/steam_elapsed_timer.off
+    }
+}
+set ::skin_background_colour #ffffff
+lappend ::fixture_loads procs
+}
+        set persistence {
+proc skin_save {} {
+    set fd [open [skin_directory]/settings/persisted.txt w]
+    puts $fd $::settings(skin)
+    close $fd
+}
+proc skin_load {key} {lappend ::physical_calls [list favourite $key]}
+lappend ::fixture_loads persistence
+}
+        set home {
+if {$::android != 1} {
+    start_idle
+}
+skin_load $::skin(auto_load_fav)
+check_app_extensions
+lappend ::fixture_loads home
+}
+        set sources {code/procs_vars.tcl code/save_and_load.tcl pages/Damian/home.tcl}
+        set files [dict create skin.tcl {error {The dependency loader/hooks must not execute}} \
+            code/default_settings.txt {theme cafe colour_theme_folder default auto_load_fav fav1 workflow latte} \
+            code/procs_vars.tcl $code code/save_and_load.tcl $persistence \
+            pages/Damian/home.tcl $home fonts/Inter-Regular.ttf synthetic-font]
+        set hashes {}
+        dict for {relative content} $files {
+            write [file join $dependency $relative] $content
+            dict set hashes $relative [::sha2::sha256 -hex $content]
+        }
+        set specification [dict create app_version 1.46.1.1 dsx2_version 3.30 sources $sources files $hashes]
+        write [file join $skin dependency-manifest.tcl] \
+            [list namespace eval ::aiden::distribution [list variable manifest $specification]]
+        write [file join $dependency Damian.start] {error {Foreign start hook executed}}
+        write [file join $dependency Damian.end] {error {Foreign end hook executed}}
+        write [file join $dependency settings skin_settings.txt] {heading private-dependency-preference auto_load_fav fav99}
+        write [file join $dependency pages cafe graphs.tcl] {protected-other-theme-file}
+        write [file join $dependency plugins steam_elapsed_timer.tcl] {protected-other-plugin-file}
+        write [file join $skin settings skin_settings.txt] {heading own-preference auto_load_fav fav5 auto_tare_negative_reading 1}
+        write [file join $app version.tcl] {package ifneeded de1app 1.46.1.1 {}}
+        write [file join $app skins default standard_includes.tcl] {
+lappend ::fixture_loads native
+proc ::backup_settings {} {lappend ::navigation_calls backup}
+proc ::fill_skin_listbox {} {lappend ::navigation_calls skins}
+}
+        write [file join $skin aiden bootstrap.tcl] {
+lappend ::fixture_loads bootstrap
+set ::standalone_seen $::aiden::standalone
+}
+        set probe [interp create]
+        $probe eval [list set ::fixture_app $app]
+        $probe eval {
+            package provide de1plus 1.0
+            package provide lambda 1.0
+            package ifneeded de1app 1.46.1.1 {}
+            set ::android 0
+            set ::fixture_loads {}
+            set ::physical_calls {}
+            set ::navigation_calls {}
+            array set ::settings {skin Aiden ghc_is_installed 7 enabled_plugins {DYE SDB} stress_test 0}
+            proc ::homedir {} {return $::fixture_app}
+            proc ::skin_directory {} {return [file join $::fixture_app skins $::settings(skin)]}
+            proc ::start_idle {} {lappend ::physical_calls start_idle}
+            proc ::scale_tare {} {lappend ::physical_calls tare}
+            proc ::save_settings {} {lappend ::physical_calls save_settings}
+            proc ::reset_skin {} {lappend ::physical_calls destructive_reset}
+            proc ::register_state_change_handler {args} {lappend ::physical_calls [list callback {*}$args]}
+            proc ::.can {args} {return}
+            proc ::dui {args} {
+                if {[lrange $args 0 1] eq {page exists}} {return 0}
+                lappend ::navigation_calls $args
+                return
+            }
+        }
+        return $skin
+    }
+    proc cleanup {} {
+        variable probe; variable root
+        if {$probe ne {}} {interp delete $probe; set probe {}}
+        if {$root ne {}} {removeDirectory $root; set root {}}
+    }
+    proc cli {path app_root} {
+        # Isolate the real CLI in a Tcl interpreter without Tk. Some managed
+        # macOS environments cannot create Tcl8.5 exec's stderr temporary file.
+        set cli_probe [interp create]
+        $cli_probe eval [list set argv [list $app_root]]
+        $cli_probe eval {
+            set cli_output {}
+            rename puts original_puts
+            proc puts {args} {lappend ::cli_output [lindex $args end]}
+            rename exit original_exit
+            proc exit {code} {error "CLI exit $code"}
+        }
+        set failed [catch {$cli_probe eval [list source $path]} problem options]
+        set output [$cli_probe eval {join $cli_output \n}]
+        interp delete $cli_probe
+        if {$failed} {return -options $options $problem}
+        return $output
+    }
+}
+
+test wrapper-source-1 {Compatibility source leaves native APIs, settings and hardware untouched} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+} -body {
+    set p $::wrapper_fixture::probe
+    set before [$p eval {list [info body ::skin_directory] [lsort [array get ::settings]]}]
+    $p eval [list source [file join $fixture_skin compat.tcl]]
+    list [expr {$before eq [$p eval {list [info body ::skin_directory] [lsort [array get ::settings]]}]}] \
+        [$p eval {list $::fixture_loads $::physical_calls $::navigation_calls}]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 {{} {} {}}}
+
+test wrapper-load-1 {Relocated standalone load preserves selected identity and reports mounting until boot confirms} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+} -body {
+    set p $::wrapper_fixture::probe
+    $p eval [list source [file join $fixture_skin skin.tcl]]
+    set first [$p eval {dict get $::aiden::distribution::status status}]
+    $p eval {::aiden::distribution::boot_success}
+    $p eval [list ::aiden::distribution::load $fixture_skin]
+    list $first [$p eval {dict get $::aiden::distribution::status status}] \
+        [$p eval {list $::fixture_loads $::physical_calls $::settings(skin) $::settings(ghc_is_installed) $::settings(enabled_plugins) $::standalone_seen}]
+} -cleanup {::wrapper_fixture::cleanup} -result {mounting loaded {{native procs persistence home bootstrap} {} Aiden 7 {DYE SDB} 1}}
+
+test wrapper-load-2 {Assets use installed DSx2 while runtime state stays with loaded Aiden during Styles preview} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+} -body {
+    set p $::wrapper_fixture::probe
+    set native_resolver [$p eval {info body ::skin_directory}]
+    $p eval [list source [file join $fixture_skin skin.tcl]]
+    $p eval {set ::settings(skin) Insight; skin_save}
+    set asset [$p eval {skin_font Inter-Regular.ttf}]
+    set fd [open [file join $fixture_skin settings persisted.txt] r]
+    set persisted [string trim [read $fd]]; close $fd
+    list [expr {$native_resolver eq [$p eval {info body ::skin_directory}]}] \
+        [expr {$asset eq [file join $fixture_skin .. DSx2 fonts Inter-Regular.ttf] || \
+            $asset eq [file normalize [file join $fixture_skin .. DSx2 fonts Inter-Regular.ttf]]}] \
+        [file exists [file join $fixture_skin .. DSx2 settings persisted.txt]] $persisted \
+        [$p eval {list $::skin(heading) $::skin(auto_load_fav) $::skin(auto_tare_negative_reading) $::physical_calls}]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 1 0 Insight {own-preference none 0 {}}}
+
+test wrapper-load-3 {Loading cannot execute dependency hooks or delete/rename its theme and plugin files} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+} -body {
+    set p $::wrapper_fixture::probe
+    $p eval [list source [file join $fixture_skin skin.tcl]]
+    list [file exists [file join $fixture_skin .. DSx2 pages cafe graphs.tcl]] \
+        [file exists [file join $fixture_skin .. DSx2 plugins steam_elapsed_timer.tcl]] \
+        [file exists [file join $fixture_skin .. DSx2 plugins steam_elapsed_timer.off]] \
+        [$p eval {list $::physical_calls [dict get $::aiden::distribution::status status]}]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 1 0 {{} mounting}}
+
+test wrapper-reject-1 {A changed dependency is rejected before any native/library evaluation or state creation} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+    file delete -force [file join $fixture_skin settings]
+    ::wrapper_fixture::write [file join $fixture_skin .. DSx2 code procs_vars.tcl] {start_idle; error malicious}
+} -body {
+    set p $::wrapper_fixture::probe
+    $p eval [list source [file join $fixture_skin compat.tcl]]
+    set refused [catch {$p eval [list ::aiden::distribution::load $fixture_skin]} error]
+    list $refused [string match {*procs_vars.tcl differs*} $error] \
+        [$p eval {list $::fixture_loads $::physical_calls $::settings(skin)}] \
+        [file exists [file join $fixture_skin settings]]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 1 {{} {} Aiden} 0}
+
+test wrapper-reject-2 {Missing required font and unsupported native version block activation} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+    file delete [file join $fixture_skin .. DSx2 fonts Inter-Regular.ttf]
+} -body {
+    set p $::wrapper_fixture::probe
+    $p eval [list source [file join $fixture_skin compat.tcl]]
+    set missing [catch {$p eval [list ::aiden::distribution::load $fixture_skin]} first_error]
+    $p eval {package forget de1app; package ifneeded de1app 1.47.0.0 {}}
+    set unsupported [catch {$p eval [list ::aiden::distribution::load $fixture_skin]} second_error]
+    list $missing [string match {*missing fonts/Inter-Regular.ttf*} $first_error] \
+        $unsupported [string match {*installed version is 1.47.0.0*} $second_error] \
+        [$p eval {list $::fixture_loads $::physical_calls}]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 1 1 1 {{} {}}}
+
+test wrapper-recovery-1 {Entry catches dependency rejection and preserves GHC/plugins instead of native reset_skin} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+    file delete [file join $fixture_skin .. DSx2 fonts Inter-Regular.ttf]
+} -body {
+    set p $::wrapper_fixture::probe
+    set escaped [catch {$p eval [list source [file join $fixture_skin skin.tcl]]}]
+    list $escaped [$p eval {dict get $::aiden::distribution::status status}] \
+        [$p eval {list $::physical_calls $::settings(skin) $::settings(ghc_is_installed) $::settings(enabled_plugins) $::fixture_loads}] \
+        [file exists [file join $fixture_skin startup-error.txt]]
+} -cleanup {::wrapper_fixture::cleanup} -result {0 blocked {{} Aiden 7 {DYE SDB} native} 1}
+
+test wrapper-recovery-2 {A synchronous bootstrap failure uses recovery without re-sourcing native includes} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+    ::wrapper_fixture::write [file join $fixture_skin aiden bootstrap.tcl] {error {Synthetic module failure}}
+} -body {
+    set p $::wrapper_fixture::probe
+    set escaped [catch {$p eval [list source [file join $fixture_skin skin.tcl]]}]
+    list $escaped [$p eval {dict get $::aiden::distribution::status status}] \
+        [$p eval {list $::fixture_loads $::physical_calls $::settings(ghc_is_installed) $::settings(enabled_plugins)}]
+} -cleanup {::wrapper_fixture::cleanup} -result {0 blocked {{native procs persistence home} {} 7 {DYE SDB}}}
+
+test wrapper-recovery-3 {Async boot failure blocks status and a later stale success cannot promote it} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+} -body {
+    set p $::wrapper_fixture::probe
+    $p eval [list source [file join $fixture_skin skin.tcl]]
+    $p eval {::aiden::distribution::boot_failure {Synthetic mount failure} [dict create -errorinfo {fixture mount failed}]}
+    $p eval {::aiden::distribution::boot_success}
+    list [$p eval {dict get $::aiden::distribution::status status}] \
+        [$p eval {list $::physical_calls $::settings(skin) $::settings(ghc_is_installed)}]
+} -cleanup {::wrapper_fixture::cleanup} -result {blocked {{} Aiden 7}}
+
+test wrapper-preflight-1 {CLI runs without Tk and neither evaluates installed source nor creates/writes settings} -setup {
+    set fixture_skin [::wrapper_fixture::setup]
+    file delete -force [file join $fixture_skin settings]
+} -body {
+    set result [::wrapper_fixture::cli [file join $fixture_skin preflight.tcl] \
+        [file dirname [file dirname $fixture_skin]]]
+    list [string match {Aiden dependency preflight passed.*} $result] \
+        [file exists [file join $fixture_skin settings]] \
+        [file exists [file join $fixture_skin .. DSx2 pages cafe graphs.tcl]]
+} -cleanup {::wrapper_fixture::cleanup} -result {1 0 1}
+
+testConstraint installedDependencyReference [expr {[info exists ::env(AIDEN_DISTRIBUTION_REFERENCE)] && \
+    [file isdirectory $::env(AIDEN_DISTRIBUTION_REFERENCE)]}]
+test wrapper-preflight-2 {Optional provided native reference passes the actual public dependency manifest} \
+        -constraints installedDependencyReference -body {
+    string match {Aiden dependency preflight passed.*} \
+        [::wrapper_fixture::cli [file join $::wrapper_fixture::wrapper_dir preflight.tcl] \
+            $::env(AIDEN_DISTRIBUTION_REFERENCE)]
+} -result 1
+
+cleanupTests

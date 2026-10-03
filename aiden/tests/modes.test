@@ -1,0 +1,393 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Source-bound settings integration with fake native APIs only. No Tk/BLE/device.
+package require tcltest 2
+namespace import ::tcltest::*
+
+namespace eval ::modes_fixture {
+    variable root [makeDirectory aiden-modes]
+    variable calls {}
+    variable snapshot {native_state Idle state idle connected 1 editable 1 pending {} context_verified 1}
+    variable save_failure 0
+    variable send_failure 0
+    variable start_during_save 0
+    variable corrupt_during_send 0
+    variable persisted {}
+    variable defaults {}
+    proc setup {} {
+        variable root
+        variable calls
+        variable snapshot
+        variable persisted
+        variable defaults
+        set calls {}
+        set persisted {}
+        set snapshot {native_state Idle state idle connected 1 editable 1 pending {} context_verified 1}
+        foreach flag {save_failure send_failure start_during_save corrupt_during_send} {set ::modes_fixture::$flag 0}
+        array unset ::settings
+        array set ::settings {flush_seconds 5 flush_flow 2.9 steam_timeout 62 steam_flow 80 steam_temperature 170 steam_disabled 0 water_temperature 85 water_volume 50 hotwater_flow 10 water_time_max 60 water_stop_on_scale 1 profile_filename gentle espresso_temperature 93 unrelated preserved}
+        array unset ::de1
+        array set ::de1 {scale_device_handle 0 in_eco_steam_mode 0 steam_disable_toggle 1}
+        set ::aiden::modes::drafts {}
+        set ::aiden::modes::workflow_draft {}
+        set ::aiden::modes::workflow_state $defaults
+        set ::aiden::modes::last_apply {}
+        set ::aiden::modes::applying 0
+        ::aiden::modes::configure -state_file [file join $root workflows.tcl]
+        foreach path [glob -nocomplain -directory $root *] {file delete -force $path}
+    }
+    proc field {mode key} {
+        foreach field [dict get [::aiden::modes::get $mode] fields] {
+            if {[dict get $field key] eq $key} {return $field}
+        }
+        error "Missing field $key"
+    }
+    proc read_file {path} {
+        set channel [open $path r]
+        set data [read $channel]
+        close $channel
+        return $data
+    }
+    proc write_file {path data} {
+        set channel [open $path w]
+        puts $channel $data
+        close $channel
+    }
+}
+namespace eval ::aiden::core {}
+proc ::aiden::core::snapshot {} {return $::modes_fixture::snapshot}
+namespace eval ::device::scale::saw {}
+proc ::device::scale::saw::on_hotwater_start {args} {error {Unexpected native operation callback}}
+proc ::save_settings {} {
+    lappend ::modes_fixture::calls save_settings
+    if {$::modes_fixture::save_failure} {error {fixture persistence failure}}
+    set ::modes_fixture::persisted [array get ::settings]
+    if {$::modes_fixture::start_during_save} {
+        dict set ::modes_fixture::snapshot native_state Espresso
+        dict set ::modes_fixture::snapshot state active
+        dict set ::modes_fixture::snapshot editable 0
+    }
+}
+proc ::de1_send_steam_hotwater_settings {} {
+    lappend ::modes_fixture::calls de1_send_steam_hotwater_settings
+    if {$::modes_fixture::send_failure} {error {fixture settings delivery failure}}
+    if {$::modes_fixture::corrupt_during_send} {set ::settings(flush_seconds) 6}
+}
+proc ::set_hotwater_flow_rate {value} {lappend ::modes_fixture::calls [list set_hotwater_flow_rate $value]}
+foreach command {start_espresso start_steam start_water start_flush start_idle de1_send_state skin_load skin_save save_settings_to_de1 select_profile} {
+    proc ::$command {args} {error {HARDWARE FENCE: unexpected physical or broad setup action}}
+}
+array set ::settings {startup untouched}
+array set ::de1 {startup untouched}
+set source_settings [lsort [array get ::settings]]
+set source_de1 [lsort [array get ::de1]]
+source [file join [file dirname [info script]] .. modes.tcl]
+set ::modes_fixture::defaults $::aiden::modes::workflow_state
+
+test source-1 {Source makes no native calls, writes or changes to application globals} -body {
+    list $::modes_fixture::calls [expr {$source_settings eq [lsort [array get ::settings]]}] \
+        [expr {$source_de1 eq [lsort [array get ::de1]]}] [glob -nocomplain -directory $::modes_fixture::root *]
+} -result {{} 1 1 {}}
+
+test native-values-1 {Synthetic native values are read live with steam flow scaling and no writes} -setup {::modes_fixture::setup} -body {
+    set ::settings(steam_flow) 110
+    set ::settings(water_temperature) 87
+    set before [lsort [array get ::settings]]
+    set flow [::modes_fixture::field steam steam_flow]
+    list [dict get $flow value] [dict get $flow display_value] [dict get $flow display_unit] \
+        [dict get [::aiden::modes::get water] values water_temperature] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::modes_fixture::calls
+} -result {110 1.1 mL/s 87 1 {}}
+
+test metadata-1 {Canonical mode IDs, bounds and units come from native source} -setup {::modes_fixture::setup} -body {
+    set duration [::modes_fixture::field flush flush_seconds]
+    set steam [::modes_fixture::field steam steam_flow]
+    set water [::modes_fixture::field hotwater water_volume]
+    list [dict get [::aiden::modes::get hot_water] mode] \
+        [dict get $duration min] [dict get $duration max] [dict get $duration step] \
+        [dict get $steam min] [dict get $steam max] [dict get $steam step] [dict get $steam display_step] \
+        [dict get $water min] [dict get $water max] [dict get $water unit]
+} -result {water 3 120 1 40 250 10 0.1 10 250 mL}
+
+test private-1 {Read, begin, edit, reset and cancel make no settings calls or writes} -setup {::modes_fixture::setup} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::modes::get steam
+    ::aiden::modes::begin steam
+    set pending [::aiden::modes::edit steam steam_timeout 80]
+    set reset [::aiden::modes::reset steam]
+    ::aiden::modes::cancel steam
+    list [dict get $pending values steam_timeout] [dict get $reset values steam_timeout] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::modes_fixture::calls \
+        [glob -nocomplain -directory $::modes_fixture::root *]
+} -result {80 62 1 {} {}}
+
+test private-2 {Later cancellation preserves an earlier explicit settings commit} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    ::aiden::modes::apply flush {flush_seconds 9}
+    ::aiden::modes::begin flush
+    ::aiden::modes::edit flush flush_seconds 12
+    ::aiden::modes::cancel flush
+    list $::settings(flush_seconds) $::modes_fixture::calls
+} -result {9 {save_settings de1_send_steam_hotwater_settings}}
+
+test apply-1 {Explicit flush apply saves and transmits settings without operation commands} -setup {::modes_fixture::setup} -body {
+    set pending [::aiden::modes::begin flush]
+    dict set pending values flush_seconds 11
+    dict set pending values flush_flow 3.5
+    set result [::aiden::modes::apply flush $pending]
+    list $::settings(flush_seconds) $::settings(flush_flow) $::settings(unrelated) \
+        [dict get $result status] [dict get $result settings_sent] [dict get $result acknowledged] $::modes_fixture::calls
+} -result {11 3.5 preserved saved 1 0 {save_settings de1_send_steam_hotwater_settings}}
+
+test apply-2 {Unchanged values perform no persistence or transmission} -setup {::modes_fixture::setup} -body {
+    set pending [::aiden::modes::begin steam]
+    set result [::aiden::modes::apply steam $pending]
+    list [dict get $result status] $::modes_fixture::calls
+} -result {unchanged {}}
+
+test apply-3 {Steam duration preserves heater disable flag, flow canonical units and recipe} -setup {::modes_fixture::setup} -body {
+    set ::settings(steam_disabled) 1
+    set ::de1(steam_disable_toggle) 0
+    ::aiden::modes::begin steam
+    ::aiden::modes::apply steam {steam_timeout 100 steam_flow 120}
+    list $::settings(steam_timeout) $::settings(steam_flow) $::settings(steam_disabled) \
+        $::de1(steam_disable_toggle) $::settings(profile_filename) $::settings(espresso_temperature)
+} -result {100 120 1 0 gentle 93}
+
+test apply-4 {Dedicated native hot-water flow setter is called only for a changed flow target} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin water
+    ::aiden::modes::apply water {hotwater_flow 6.2 water_volume 90}
+    set first $::modes_fixture::calls
+    set ::modes_fixture::calls {}
+    ::aiden::modes::begin water
+    ::aiden::modes::apply water {water_temperature 90}
+    list $first $::modes_fixture::calls $::settings(hotwater_flow) $::settings(water_volume)
+} -result {{save_settings de1_send_steam_hotwater_settings {set_hotwater_flow_rate 6.2}} {save_settings de1_send_steam_hotwater_settings} 6.2 90}
+
+test guards-1 {All native idle, connection, pending and context requirements are checked before writes} -setup {::modes_fixture::setup} -body {
+    set original $::modes_fixture::snapshot
+    set failures {}
+    foreach {key value} {native_state Steam state active connected 0 editable 0 pending start context_verified 0} {
+        set ::modes_fixture::snapshot $original
+        ::aiden::modes::begin flush
+        dict set ::modes_fixture::snapshot $key $value
+        lappend failures [catch {::aiden::modes::apply flush {flush_seconds 10}}]
+    }
+    set ::modes_fixture::snapshot {state idle editable 1}
+    lappend failures [catch {::aiden::modes::apply flush {flush_seconds 10}}]
+    list $failures $::settings(flush_seconds) $::modes_fixture::calls
+} -result {{1 1 1 1 1 1 1} 5 {}}
+
+test guards-2 {Settings commit requires a matching open draft} -setup {::modes_fixture::setup} -body {
+    set failures [list [catch {::aiden::modes::apply flush {flush_seconds 10}}]]
+    set pending [::aiden::modes::begin steam]
+    ::aiden::modes::begin flush
+    lappend failures [catch {::aiden::modes::apply flush $pending}]
+    list $failures $::modes_fixture::calls
+} -result {{1 1} {}}
+
+test stale-1 {External settings changes invalidate an edit without restoring older globals} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    set ::settings(flush_flow) 4.0
+    list [catch {::aiden::modes::apply flush {flush_seconds 10}}] $::settings(flush_flow) $::modes_fixture::calls
+} -result {1 4.0 {}}
+
+test limits-1 {Invalid bounds, steps, nonfinite numbers and unsupported fields never mutate settings} -setup {::modes_fixture::setup} -body {
+    set before [lsort [array get ::settings]]
+    set failures {}
+    foreach {mode values} {
+        flush {flush_seconds 2} flush {flush_seconds 121} flush {flush_seconds 3.5}
+        flush {flush_flow 0.9} flush {flush_flow 10.1} flush {flush_flow 2.95}
+        steam {steam_timeout 0} steam {steam_timeout 256} steam {steam_flow 39}
+        steam {steam_flow 260} steam {steam_flow 45} steam {steam_temperature 171}
+        steam {steam_disabled 2} water {water_temperature 19} water {water_temperature 111}
+        water {water_volume 9} water {water_volume 251} water {water_time_max 0}
+        water {water_time_max 256} flush {flush_flow NaN} flush {flush_flow Inf}
+        flush {flush_seconds {1; start_flush}} flush {steam_timeout 20}
+    } {
+        ::aiden::modes::begin $mode
+        lappend failures [catch {::aiden::modes::apply $mode $values}]
+    }
+    list [expr {[lsearch -exact $failures 0] < 0}] [llength $failures] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::modes_fixture::calls
+} -result {1 23 1 {}}
+
+test limits-2 {Out-of-range existing native values stay visible and survive unrelated edits} -setup {::modes_fixture::setup} -body {
+    set ::settings(steam_flow) 700
+    set ::settings(steam_timeout) 0
+    ::aiden::modes::begin steam
+    ::aiden::modes::apply steam {steam_temperature 169}
+    list $::settings(steam_flow) $::settings(steam_timeout) [dict get [::modes_fixture::field steam steam_flow] display_value]
+} -result {700 0 7.0}
+
+test amount-1 {A configured address alone does not change volume to grams} -setup {::modes_fixture::setup} -body {
+    set ::settings(scale_bluetooth_address) FAKE
+    set volume [::modes_fixture::field water water_volume]
+    set ::de1(scale_device_handle) 17
+    set weight [::modes_fixture::field water water_volume]
+    list [dict get $volume unit] [dict get $weight unit] [dict get $weight available]
+} -result {mL g 1}
+
+test amount-2 {Connected scale with native weight stop disabled exposes ineffective amount} -setup {::modes_fixture::setup} -body {
+    set ::de1(scale_device_handle) 17
+    set ::settings(water_stop_on_scale) 0
+    set field [::modes_fixture::field water water_volume]
+    ::aiden::modes::begin water
+    list [dict get $field available] [dict get $field unit] \
+        [string match {*250 mL*} [dict get $field reason]] \
+        [catch {::aiden::modes::apply water {water_volume 80}}] $::modes_fixture::calls
+} -result {0 {} 1 1 {}}
+
+test amount-3 {Native unit changes during editing invalidate the transaction} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin water
+    set ::de1(scale_device_handle) 17
+    list [catch {::aiden::modes::apply water {water_volume 80}}] $::settings(water_volume) $::modes_fixture::calls
+} -result {1 50 {}}
+
+test amount-4 {Missing native weight stop support is qualified rather than fabricated} -setup {
+    ::modes_fixture::setup
+    rename ::device::scale::saw::on_hotwater_start ::modes_fixture::saved_saw
+} -body {
+    set ::de1(scale_device_handle) 17
+    set field [::modes_fixture::field water water_volume]
+    list [dict get $field available] [dict get $field unit] [string match {*unavailable*} [dict get $field reason]]
+} -cleanup {rename ::modes_fixture::saved_saw ::device::scale::saw::on_hotwater_start} -result {0 {} 1}
+
+test heater-1 {Heater target is qualified in eco mode and never presented as measured milk temperature} -setup {::modes_fixture::setup} -body {
+    set ::de1(in_eco_steam_mode) 1
+    set field [::modes_fixture::field steam steam_temperature]
+    ::aiden::modes::begin steam
+    list [dict get $field label] [dict get $field available] \
+        [string match {*not measured milk*} [dict get $field semantics]] \
+        [catch {::aiden::modes::apply steam {steam_temperature 160}}] $::modes_fixture::calls
+} -result {{Heater temperature} 0 1 1 {}}
+
+test errors-1 {Save failure restores globals, exposes persistence uncertainty and sends nothing} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    set ::modes_fixture::save_failure 1
+    set failed [catch {::aiden::modes::apply flush {flush_seconds 10}} message options]
+    list $failed $::settings(flush_seconds) [dict get [::aiden::modes::last_apply] status] \
+        [dict get [::aiden::modes::last_apply] persisted] [dict get $options -errorcode] $::modes_fixture::calls
+} -result {1 5 persistence_failed unknown {AIDEN MODES SAVE_UNCONFIRMED} save_settings}
+
+test errors-2 {Send failure retains persisted settings and does not claim machine acknowledgement} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    set ::modes_fixture::send_failure 1
+    catch {::aiden::modes::apply flush {flush_seconds 10}}
+    set result [::aiden::modes::last_apply]
+    list $::settings(flush_seconds) [dict get $::modes_fixture::persisted flush_seconds] \
+        [dict get $result status] [dict get $result acknowledged] $::modes_fixture::calls
+} -result {10 10 transmission_unconfirmed 0 {save_settings de1_send_steam_hotwater_settings}}
+
+test errors-3 {An external start during persistence prevents subsequent transmission} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    set ::modes_fixture::start_during_save 1
+    list [catch {::aiden::modes::apply flush {flush_seconds 10}}] \
+        $::settings(flush_seconds) [dict get [::aiden::modes::last_apply] status] $::modes_fixture::calls
+} -result {1 10 transmission_unconfirmed save_settings}
+
+test errors-4 {Read-back failure is reported without asserting successful native settings} -setup {::modes_fixture::setup} -body {
+    ::aiden::modes::begin flush
+    set ::modes_fixture::corrupt_during_send 1
+    list [catch {::aiden::modes::apply flush {flush_seconds 10}}] \
+        $::settings(flush_seconds) [dict get [::aiden::modes::last_apply] status]
+} -result {1 6 transmission_unconfirmed}
+
+test errors-5 {Missing hot-water setter blocks flow changes before globals or persistence} -setup {
+    ::modes_fixture::setup
+    rename ::set_hotwater_flow_rate ::modes_fixture::saved_flow_setter
+} -body {
+    ::aiden::modes::begin water
+    list [catch {::aiden::modes::apply water {hotwater_flow 6}}] $::settings(hotwater_flow) $::modes_fixture::calls
+} -cleanup {rename ::modes_fixture::saved_flow_setter ::set_hotwater_flow_rate} -result {1 10 {}}
+
+test workflows-1 {Approved orders are shared native mode IDs and contain no auto-start} -setup {::modes_fixture::setup} -body {
+    set state [::aiden::modes::workflow get]
+    list [dict get $state workflows espresso order] [dict get $state workflows latte order] \
+        [dict get $state workflows americano order] [dict get $state workflows steam order] \
+        [dict get $state auto_start] [::aiden::modes::workflow next espresso latte] \
+        [::aiden::modes::workflow next flush latte] [::aiden::modes::workflow next espresso americano] $::modes_fixture::calls
+} -result {espresso {espresso flush steam} {espresso water} {espresso steam} 0 flush steam water {}}
+
+test workflows-2 {Workflow drafts, reset and cancel neither persist nor touch native settings} -setup {::modes_fixture::setup} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::modes::workflow begin latte
+    ::aiden::modes::workflow edit skipped flush
+    set pending [::aiden::modes::workflow reset latte]
+    ::aiden::modes::workflow cancel
+    list [dict get $pending skipped] [dict get [::aiden::modes::workflow get] selected] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::modes_fixture::calls \
+        [glob -nocomplain -directory $::modes_fixture::root *]
+} -result {{} espresso 1 {} {}}
+
+test workflows-3 {Explicit workflow save survives local reload; next-mode computation stays pure} -setup {::modes_fixture::setup} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::modes::workflow begin latte
+    set pending [::aiden::modes::workflow edit skipped flush]
+    ::aiden::modes::workflow apply $pending
+    set saved [::modes_fixture::read_file [file join $::modes_fixture::root workflows.tcl]]
+    set ::aiden::modes::workflow_state $::modes_fixture::defaults
+    set loaded [::aiden::modes::workflow load]
+    list [dict get $saved selected] [dict get $loaded skipped] \
+        [::aiden::modes::workflow next espresso] [::aiden::modes::workflow next steam] \
+        [expr {$before eq [lsort [array get ::settings]]}] $::modes_fixture::calls
+} -result {latte flush steam {} 1 {}}
+
+test workflows-4 {Blocked machine state prevents workflow persistence or preparation changes} -setup {::modes_fixture::setup} -body {
+    set pending [::aiden::modes::workflow begin americano]
+    dict set ::modes_fixture::snapshot pending start
+    list [catch {::aiden::modes::workflow apply $pending}] \
+        [dict get [::aiden::modes::workflow get] selected] \
+        [glob -nocomplain -directory $::modes_fixture::root *] $::modes_fixture::calls
+} -result {1 espresso {} {}}
+
+test workflows-5 {Unsupported or physical workflow payloads fail with no partial save} -setup {::modes_fixture::setup} -body {
+    set failures {}
+    foreach config {
+        {order {espresso steam steam} skipped {}}
+        {order {espresso steam} skipped flush}
+        {order {espresso {start_steam}} skipped {}}
+        {order {} skipped {}}
+        {order {espresso water} skipped {} auto_start 1}
+        {order {steam espresso} skipped {}}
+        {order {espresso steam} skipped espresso}
+    } {
+        set pending [::aiden::modes::workflow begin latte]
+        set pending [dict merge $pending $config]
+        lappend failures [catch {::aiden::modes::workflow apply $pending}]
+    }
+    list $failures [dict get [::aiden::modes::workflow get] selected] \
+        [glob -nocomplain -directory $::modes_fixture::root *] $::modes_fixture::calls
+} -result {{1 1 1 1 1 1 1} espresso {} {}}
+
+test workflows-6 {Corrupt or command-like stored workflow data is not evaluated or partially loaded} -setup {::modes_fixture::setup} -body {
+    set path [file join $::modes_fixture::root workflows.tcl]
+    ::modes_fixture::write_file $path {schema 1 selected latte workflows {[start_steam]}}
+    list [catch {::aiden::modes::workflow load}] [dict get [::aiden::modes::workflow get] selected] $::modes_fixture::calls
+} -result {1 espresso {}}
+
+test workflows-7 {A local write failure leaves committed workflow untouched} -setup {::modes_fixture::setup} -body {
+    set path [file join $::modes_fixture::root not-a-file]
+    file mkdir $path
+    ::aiden::modes::configure -state_file $path
+    set pending [::aiden::modes::workflow begin latte]
+    list [catch {::aiden::modes::workflow apply $pending}] \
+        [dict get [::aiden::modes::workflow get] selected] $::modes_fixture::calls
+} -result {1 espresso {}}
+
+test workflows-8 {Explicit custom preparation order and optional skips persist without native actions} -setup {::modes_fixture::setup} -body {
+    set saved [::aiden::modes::workflow configure americano {espresso steam water flush} flush]
+    list [dict get $saved order] [dict get $saved skipped] \
+        [::aiden::modes::workflow next espresso] [::aiden::modes::workflow next steam] \
+        [::aiden::modes::workflow next water] $::modes_fixture::calls
+} -result {{espresso steam water flush} flush steam water {} {}}
+
+test setups-1 {Saved beverage setup routing is broad, explicit and distinct from profile bookmarks} -setup {::modes_fixture::setup} -body {
+    set route [::aiden::modes::setup route]
+    list [dict get $route route] [dict get $route page] [dict get $route configuration_page] \
+        [dict get $route bookmark] [dict get $route auto_start] \
+        [string match {*dose*steam*hot-water*} [dict get $route scope]] \
+        [catch {::aiden::modes::setup load}] $::modes_fixture::calls
+} -result {native_home off workflow_settings 0 0 1 1 {}}
+
+removeDirectory $::modes_fixture::root
+cleanupTests

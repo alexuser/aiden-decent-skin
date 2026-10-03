@@ -1,0 +1,809 @@
+# SPDX-License-Identifier: GPL-3.0-only
+package require tcltest 2
+namespace import ::tcltest::*
+
+# A pure controller must source and run without Tk or physical/native writers.
+namespace eval ::lifecycle_fixture {variable hardware_calls {}; variable base {}}
+foreach command {start_espresso start_idle start_flush start_steam start_water start_next_step move_to_the_next_step tare save_settings save_settings_to_de1 save_espresso_to_history} {
+    proc ::$command {args} {
+        lappend ::lifecycle_fixture::hardware_calls [info level 0]
+        error {Unexpected physical or persistence call}
+    }
+}
+source [file join [file dirname [info script]] .. aiden lifecycle.tcl]
+
+namespace eval ::lifecycle_fixture {
+    variable base [dict create state idle substate ready connected 1 ready 1 mode {} \
+        start_verified 1 can_start_by_mode {espresso 1 flush 1 steam 1 water 1} \
+        scale_connected 1 weight 0 temperature 91.2 profile_title {Frozen / complete profile name} \
+        profile_id original dose 18 target_yield 36 target_temp 93 elapsed {} \
+        flow_confirmed 0 flow_ended 0 result_finalized 0 operation_id {}]
+    proc ready {{workflow latte}} {
+        variable base
+        ::aiden::lifecycle::reset [dict create workflow $workflow]
+        return [::aiden::lifecycle::ingest $base]
+    }
+    proc snapshot {{changes {}}} {
+        variable base
+        return [dict merge $base $changes]
+    }
+    proc active {{changes {}}} {
+        return [::aiden::lifecycle::ingest [snapshot [dict merge \
+            {state espresso substate pouring mode espresso ready 0 flow_confirmed 1 elapsed 10 weight 12 operation_id espresso:1} $changes]]]
+    }
+    proc ended {{changes {}}} {
+        return [::aiden::lifecycle::ingest [snapshot [dict merge \
+            {state idle mode espresso flow_confirmed 1 flow_ended 1 elapsed 20 weight 30 operation_id espresso:1} $changes]]]
+    }
+    proc finalized {{changes {}}} {
+        return [ended [dict merge {result_finalized 1 final_weight 36.6 final_weight_quality valid \
+            final_elapsed 20 result_id espresso:1 result_saved 1 history_id native-shot-1 outcome normal} $changes]]
+    }
+    proc value {key} {return [dict get [::aiden::lifecycle::presentation] $key]}
+}
+
+test source-1 {Sourcing the lifecycle needs no Tk and dispatches nothing} -body {
+    list [package provide Tk] $::lifecycle_fixture::hardware_calls
+} -result {{} {}}
+
+test reset-1 {Unverified initial state never invents zero telemetry or readiness} -body {
+    set p [::aiden::lifecycle::reset]
+    list [dict get $p phase] [dict get $p primary_action] [dict get $p primary_enabled] \
+        [dict get $p elapsed] [dict get $p weight] [dict get $p result]
+} -result {unknown-or-blocked wait 0 {} {} {}}
+
+test readiness-1 {Generic ready does not advertise a verified native Start capability} -setup {
+    ::aiden::lifecycle::reset
+} -body {
+    set p [::aiden::lifecycle::ingest {state idle connected 1 ready 1}]
+    list [dict get $p primary_action] [dict get [::aiden::lifecycle::request start] accepted]
+} -result {wait 0}
+
+test readiness-2 {Each selected mode uses its own verified native start policy} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    ::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {can_start_by_mode {espresso 1 flush 1 steam 0 water 1}}]
+    ::aiden::lifecycle::select_mode steam
+    set first [::lifecycle_fixture::value primary_action]
+    ::aiden::lifecycle::select_mode water
+    list $first [::lifecycle_fixture::value primary_action] [::lifecycle_fixture::value freshStart]
+} -result {wait start 1}
+
+test request-1 {A rapid repeat never produces a second Start intent} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set a [::aiden::lifecycle::request start]
+    set b [::aiden::lifecycle::request start]
+    list [dict get $a accepted] [dict get $b accepted] [::lifecycle_fixture::value phase] \
+        [::lifecycle_fixture::value primary_action] [::lifecycle_fixture::value elapsed] $::lifecycle_fixture::hardware_calls
+} -result {1 0 start-requested stop {} {}}
+
+test request-2 {Polling and visual reading delays never confirm Start or create a timer} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    for {set i 0} {$i < 50} {incr i} {
+        ::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {elapsed 180 weight 0 idle_verified 1 operation_reconciled 0}]
+    }
+    list [::lifecycle_fixture::value phase] [::lifecycle_fixture::value elapsed] \
+        [::lifecycle_fixture::value flow_confirmed] [llength [::aiden::lifecycle::history]]
+} -result {start-requested {} 0 0}
+
+test request-3 {Explicit rejection reconciles preparation and exposes its native reason} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {start_rejected 1 request_reason {Native scale policy refused Start}}]]
+    list [dict get $p phase] [dict get $p stop_available] [dict get $p reason] [dict get $p primary_action]
+} -result {prepared 0 {Native scale policy refused Start} start}
+
+test request-4 {A delayed rejection cannot erase a machine-observed start} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {start_rejected 1}]
+    list [dict get $p phase] [dict get $p stop_available] [dict get $p elapsed]
+} -result {active 1 10.0}
+
+test physical-1 {External operation starts freeze observed recipe identity without a tablet request} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set a [::lifecycle_fixture::active {profile_title {External actual profile} dose 19 target_yield 42}]
+    set b [::lifecycle_fixture::active {profile_title {Future profile} dose 21 target_yield 50}]
+    list [dict get $a phase] [dict get $b profile_title] [dict get $b dose] \
+        [dict get $b primary_action] [dict get $b can_select_mode]
+} -result {active {External actual profile} 19.0 stop 0}
+
+test flow-1 {An observed preflow operation has Stop but no fabricated elapsed time} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set p [::lifecycle_fixture::active {flow_confirmed 0 substate heating elapsed 3}]
+    list [dict get $p phase] [dict get $p status] [dict get $p elapsed] [dict get $p stop_available]
+} -result {active {Waiting for flow} {} 1}
+
+test flow-2 {Stop request and actual flow end are distinct and timing stays live between them} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set stop [::aiden::lifecycle::request stop]
+    set running [::lifecycle_fixture::active {elapsed 11.2 weight 18}]
+    set end [::lifecycle_fixture::ended {elapsed 11.6 weight 18.4}]
+    list [dict get $stop accepted] [dict get $running phase] [dict get $running elapsed] \
+        [dict get $running flow_ended] [dict get $end phase] [dict get $end elapsed] [dict get $end primary_action]
+} -result {1 stop-requested 11.2 0 flow-ended 11.6 wait}
+
+test flow-3 {Native ending before flow-end acknowledgement uses the same stable Stop action} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {operation_ending 1 substate ending elapsed 11}]
+    list [dict get $p phase] [dict get $p primary_action] [dict get $p flow_ended] [dict get $p elapsed]
+} -result {stop-requested stop 0 11.0}
+
+test flow-4 {Confirmed duration freezes while native settling weight continues} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::ended
+} -body {
+    set p [::lifecycle_fixture::ended {elapsed 100 weight 32.9}]
+    list [dict get $p phase] [dict get $p elapsed] [dict get $p weight] [dict get $p result_finalized]
+} -result {settling 20.0 32.9 0}
+
+test flow-5 {No count of settling polls can finalize a result or append history} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::ended
+} -body {
+    for {set i 0} {$i < 100} {incr i} {::lifecycle_fixture::ended {weight 36.6}}
+    list [::lifecycle_fixture::value phase] [::lifecycle_fixture::value result_finalized] \
+        [::aiden::lifecycle::result] [llength [::aiden::lifecycle::history]]
+} -result {settling 0 {} 0}
+
+test flow-6 {Finalization without confirmed flow end cannot manufacture a completed shot} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {result_finalized 1 result_saved 1 final_weight 36.6}]
+    list [dict get $p phase] [dict get $p result_finalized] [llength [::aiden::lifecycle::history]]
+} -result {active 0 0}
+
+test flow-7 {A native idle state alone does not assert end of previously confirmed flow} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {operation_id espresso:1 idle_verified 1 operation_reconciled 1}]]
+    list [dict get $p phase] [dict get $p flow_ended] [dict get $p stop_available]
+} -result {unknown-or-blocked 0 1}
+
+test flow-8 {Verified cancellation before any flow returns to preparation without creating a shot} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+    ::aiden::lifecycle::request stop
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {operation_reconciled 1}]]
+    list [dict get $p phase] [dict get $p elapsed] [llength [::aiden::lifecycle::history]] [dict get $p stop_available]
+} -result {prepared {} 0 0}
+
+test result-1 {Native finalization freezes exact duration, final yield, identity and sample gaps once} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {graph_samples {elapsed {0 10} pressure {0 NaN} flow {0 2}}}
+    ::lifecycle_fixture::ended
+} -body {
+    set p [::lifecycle_fixture::finalized {final_elapsed 999 graph_samples {elapsed {0 10 20} pressure {0 NaN 6} flow {0 2 1.8}}}]
+    set frozen [::aiden::lifecycle::result]
+    for {set i 0} {$i < 5} {incr i} {
+        ::lifecycle_fixture::finalized {final_weight 99 final_elapsed 199 profile_title {New recipe} dose 25 graph_samples {elapsed 999 pressure 9 flow 4}}
+    }
+    list [dict get $p phase] [dict get $frozen elapsed] [dict get $frozen weight] \
+        [dict get $frozen profile_title] [dict get $frozen graph_samples pressure] \
+        [expr {$frozen eq [::aiden::lifecycle::result]}] [llength [::aiden::lifecycle::history]]
+} -result {result 20.0 36.6 {Frozen / complete profile name} {0 NaN 6} 1 1}
+
+test result-2 {Delayed history saving updates metadata while preserving immutable result and one record} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized {result_saved 0 save_error {Disk unavailable} history_id {}}
+} -body {
+    set frozen [::aiden::lifecycle::result]
+    set before [::lifecycle_fixture::value result_state]
+    ::lifecycle_fixture::finalized {final_weight 77 result_saved 1 save_error {} history_id native-shot-1}
+    list $before [::lifecycle_fixture::value result_state] [::lifecycle_fixture::value result_save_error] \
+        [expr {$frozen eq [::aiden::lifecycle::result]}] [llength [::aiden::lifecycle::history]]
+} -result {Unsaved Saved {} 1 1}
+
+test result-3 {Native save failure is visible and blocks reading-hold handoff} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {result_saved 0 save_error {Native history disabled} history_id {}}]
+    list [dict get $p result_state] [dict get $p result_save_error] [dict get $p auto_handoff_available] \
+        [dict get [::aiden::lifecycle::complete_hold] accepted]
+} -result {Unsaved {Native history disabled} 0 0}
+
+test result-4 {No native outcome evidence never advertises ordinary completion or automatic handoff} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {outcome unknown stop_reason unknown}]
+    list [dict get $p result outcome] [dict get $p result outcome_label] [dict get $p auto_handoff_available]
+} -result {unknown {Outcome unconfirmed} 0}
+
+test result-5 {Missing operation identity stays an observation and never qualifies for automatic handoff} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {operation_id {}}
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_id {}}]
+    list [dict get $p result operation_id] [dict get $p result identity_quality] [dict get $p auto_handoff_available]
+} -result {{} observed 0}
+
+test result-6 {A mismatched native final-result identity cannot finalize the current operation} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {final_result {operation_id espresso:99 final_weight 36.6}}]
+    list [dict get $p result_finalized] [llength [::aiden::lifecycle::history]] [dict get $p primary_action]
+} -result {0 0 wait}
+
+test result-7 {Recovered native record uses its own frozen recipe and measurements and cancels hold} -setup {
+    ::aiden::lifecycle::reset {workflow latte}
+} -body {
+    set p [::lifecycle_fixture::finalized {profile_title {Future recipe} dose 25 \
+        final_result {operation_id espresso:1 mode espresso final_elapsed 27.4 graph_samples {elapsed {0 27.4}} \
+            recipe {profile_title {Recorded original} profile_id recorded dose 17 target_yield 34 target_temp 92}} \
+        final_elapsed 27.4}]
+    list [dict get $p phase] [dict get $p result profile_title] [dict get $p result dose] \
+        [dict get $p result elapsed] [dict get $p auto_handoff_available] [llength [::aiden::lifecycle::history]]
+} -result {result {Recorded original} 17 27.4 0 1}
+
+test result-8 {A bare retained idle completion flag without an identified native record makes no shot} -setup {
+    ::aiden::lifecycle::reset
+} -body {
+    ::lifecycle_fixture::finalized {operation_id {} final_result {}}
+    list [::aiden::lifecycle::result] [llength [::aiden::lifecycle::history]]
+} -result {{} 0}
+
+test scale-1 {Scale loss during flow shows missing data, preserves qualified last-known weight and Stop} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {scale_connected 0 weight 0}]
+    list [dict get $p weight] [dict get $p weight_quality] [dict get $p last_known_weight] \
+        [dict get $p primary_action] [dict get $p stage_advance_available]
+} -result {{} unavailable 12.0 stop 0}
+
+test scale-2 {A connected but stale scale never presents old measurements as live or final zero} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {weight 0 weight_quality stale}]
+    ::lifecycle_fixture::ended {scale_connected 0 weight 0}
+    set final [::lifecycle_fixture::finalized {scale_connected 0 final_weight {} final_weight_quality unavailable}]
+    list [dict get $p weight] [dict get $p weight_quality] [dict get $final result weight] [dict get $final result weight_quality]
+} -result {{} stale {} unavailable}
+
+test scale-3 {Native final estimates retain their qualification and numeric value} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {final_weight 36.2 final_weight_quality native_final_estimate}]
+    list [dict get $p result weight] [dict get $p result weight_quality]
+} -result {36.2 native_final_estimate}
+
+test scale-4 {A true measured zero is distinguishable from an unavailable reading} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set a [::lifecycle_fixture::value weight]
+    ::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {scale_connected 0 weight 0}]
+    list $a [::lifecycle_fixture::value weight]
+} -result {0.0 {}}
+
+test scale-5 {NaN, infinite and malformed sensor fields remain unavailable} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set p [::lifecycle_fixture::active {weight NaN temperature Inf elapsed nope}]
+    list [dict get $p weight] [dict get $p temperature] [dict get $p elapsed]
+} -result {{} {} {}}
+
+test stop-1 {Repeated Stop taps produce one intent and no queued replay} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set first [::aiden::lifecycle::request stop]
+    set second [::aiden::lifecycle::request stop]
+    list [dict get $first accepted] [dict get $second accepted] [::lifecycle_fixture::value primary_action] \
+        [::lifecycle_fixture::value stop_available] $::lifecycle_fixture::hardware_calls
+} -result {1 0 stop 1 {}}
+
+test stop-2 {Manual Stop cancels even a later ordinary native completion hold} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::aiden::lifecycle::request stop
+} -body {
+    set p [::lifecycle_fixture::finalized]
+    set hold [::aiden::lifecycle::complete_hold]
+    set explicit [::aiden::lifecycle::continue]
+    list [dict get $p auto_handoff_available] [dict get $hold accepted] [dict get $explicit accepted] \
+        [::lifecycle_fixture::value phase] [::lifecycle_fixture::value mode] [::lifecycle_fixture::value fresh_start]
+} -result {0 0 1 next-mode-prepared flush 1}
+
+test stop-3 {Physical manual-stop evidence cancels automatic handoff without a tablet request} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {stop_reason physical_stop outcome unknown}]
+    list [dict get $p result outcome] [dict get $p auto_handoff_available] [dict get $p primary_action]
+} -result {manual 0 continue}
+
+test stop-4 {Rejected Stop permits a new explicit attempt while retaining handoff cancellation} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::aiden::lifecycle::request stop
+} -body {
+    set p [::lifecycle_fixture::active {stop_rejected 1 request_reason {Stop dispatch refused}}]
+    set retry [::aiden::lifecycle::request stop]
+    ::lifecycle_fixture::finalized
+    list [dict get $p phase] [dict get $p reason] [dict get $retry accepted] [::lifecycle_fixture::value auto_handoff_available]
+} -result {active {Stop dispatch refused} 1 0}
+
+test connection-1 {Unknown Start delivery preserves Stop and cannot replay Start after reconnect} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    set lost [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {connected 0 request_outcome unknown}]]
+    set recovered [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {}]]
+    list [dict get $lost phase] [dict get $lost primary_action] [dict get $recovered phase] \
+        [dict get [::aiden::lifecycle::request start] accepted] [llength [::aiden::lifecycle::history]]
+} -result {unknown-or-blocked stop unknown-or-blocked 0 0}
+
+test connection-2 {Disconnection during activity permanently cancels the ordinary-result hold} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set lost [::lifecycle_fixture::active {connected 0}]
+    set recovered [::lifecycle_fixture::active]
+    set final [::lifecycle_fixture::finalized]
+    list [dict get $lost phase] [dict get $lost stop_available] [dict get $lost temperature] \
+        [dict get $recovered phase] [dict get $final auto_handoff_available]
+} -result {unknown-or-blocked 1 {} active 0}
+
+test connection-3 {An unknown connected physical state cannot turn into Ready or discard the operation} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {state unknown mode {} ready 1}]
+    list [dict get $p phase] [dict get $p primary_action] [dict get $p can_select_mode] \
+        [dict get [::aiden::lifecycle::request start] accepted]
+} -result {unknown-or-blocked stop 0 0}
+
+test ordering-1 {Lower native event sequences cannot roll a live operation back to idle} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {snapshot_sequence 5}
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {snapshot_sequence 4}]]
+    list [dict get $p phase] [dict get $p elapsed] [dict get $p operation_id]
+} -result {active 10.0 espresso:1}
+
+test ordering-2 {Equal event sequences can carry new native sensor samples} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {snapshot_sequence 5}
+} -body {
+    set p [::lifecycle_fixture::active {snapshot_sequence 5 elapsed 11.5 weight 18.5}]
+    list [dict get $p elapsed] [dict get $p weight]
+} -result {11.5 18.5}
+
+test ordering-3 {Retired exact operation identities cannot reopen or overwrite a newer shot} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    ::aiden::lifecycle::continue
+    ::lifecycle_fixture::active {operation_id espresso:2 elapsed 1 weight 1}
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_id espresso:1 final_weight 90}]
+    list [dict get $p phase] [dict get $p operation_id] [dict get $p elapsed] [llength [::aiden::lifecycle::history]]
+} -result {active espresso:2 1.0 1}
+
+test ordering-4 {Unknown identity uses a new observed idle-to-active edge without duplicating old results} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {operation_id {}}
+    ::lifecycle_fixture::finalized {operation_id {}}
+} -body {
+    set first [dict get [::aiden::lifecycle::result] id]
+    ::lifecycle_fixture::active {operation_id {} elapsed 1 weight 1}
+    ::lifecycle_fixture::finalized {operation_id {} final_weight 22}
+    list [llength [::aiden::lifecycle::history]] [expr {$first ne [dict get [::aiden::lifecycle::result] id]}]
+} -result {2 1}
+
+test ordering-5 {Same exact completed operation cannot create a new record through repeated active feedback} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set first [::aiden::lifecycle::result]
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized {final_weight 99}
+    list [llength [::aiden::lifecycle::history]] [expr {$first eq [::aiden::lifecycle::result]}]
+} -result {1 1}
+
+test handoff-1 {Ordinary saved completion prepares the next view only after an explicit hold callback} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized]
+    for {set i 0} {$i < 10} {incr i} {::aiden::lifecycle::presentation}
+    set before [::lifecycle_fixture::value mode]
+    set hold [::aiden::lifecycle::complete_hold [dict get $p operation_identity]]
+    list [dict get $p auto_handoff_available] $before [dict get $hold accepted] \
+        [::lifecycle_fixture::value mode] [::lifecycle_fixture::value primary_action] \
+        [::lifecycle_fixture::value fresh_start] $::lifecycle_fixture::hardware_calls
+} -result {1 espresso 1 flush start 1 {}}
+
+test handoff-2 {A stale reading-hold callback cannot advance a newer result} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set first [dict get [::aiden::lifecycle::operation_result] id]
+    ::aiden::lifecycle::continue
+    ::lifecycle_fixture::active {operation_id espresso:2}
+    ::lifecycle_fixture::finalized {operation_id espresso:2 result_id espresso:2 history_id native-shot-2}
+    list [dict get [::aiden::lifecycle::complete_hold $first] accepted] [::lifecycle_fixture::value mode] \
+        [::lifecycle_fixture::value phase]
+} -result {0 espresso result}
+
+test handoff-3 {Handoff repeats are idempotent and selecting a view never starts it} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    ::aiden::lifecycle::complete_hold
+    set repeat [::aiden::lifecycle::complete_hold]
+    ::aiden::lifecycle::select_mode water
+    list [dict get $repeat accepted] [::lifecycle_fixture::value mode] [::lifecycle_fixture::value busy] \
+        [::lifecycle_fixture::value freshStart] [llength [::aiden::lifecycle::history]]
+} -result {0 water 0 1 1}
+
+test workflow-1 {Approved workflows are espresso, latte, americano and espresso plus steam} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set orders {}
+    foreach workflow {espresso latte americano steam} {
+        set p [::aiden::lifecycle::configure_workflow $workflow]
+        lappend orders [dict get $p workflow_modes]
+    }
+    set orders
+} -result {espresso {espresso flush steam} {espresso water} {espresso steam}}
+
+test workflow-2 {Skipping an optional mode alters preparation order only} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::configure_workflow latte {skipped_modes flush}
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    ::aiden::lifecycle::complete_hold
+    list [::lifecycle_fixture::value mode] [::lifecycle_fixture::value primary_action] \
+        [::lifecycle_fixture::value fresh_start] $::lifecycle_fixture::hardware_calls
+} -result {steam start 1 {}}
+
+test workflow-3 {Active or unresolved operations block mode and workflow changes} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    list [catch {::aiden::lifecycle::select_mode water}] \
+        [catch {::aiden::lifecycle::configure_workflow americano}] [::lifecycle_fixture::value mode]
+} -result {1 1 espresso}
+
+test workflow-4 {Configuration validation is atomic and does not skip mandatory espresso} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set before [::aiden::lifecycle::presentation]
+    list [catch {::aiden::lifecycle::configure_workflow latte {skipped_modes espresso}}] \
+        [catch {::aiden::lifecycle::configure_workflow mystery}] \
+        [expr {$before eq [::aiden::lifecycle::presentation]}]
+} -result {1 1 1}
+
+test workflow-5 {Non-espresso completion preserves the preceding shot and never adds espresso history} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    ::aiden::lifecycle::continue
+} -body {
+    set shot [::aiden::lifecycle::result]
+    ::aiden::lifecycle::request start
+    ::lifecycle_fixture::active {state hot_water_rinse mode flush operation_id flush:2}
+    ::lifecycle_fixture::finalized {mode flush operation_id flush:2 result_id flush:2 history_id {} result_saved 0}
+    ::aiden::lifecycle::continue
+    list [::lifecycle_fixture::value mode] [expr {$shot eq [::aiden::lifecycle::result]}] \
+        [llength [::aiden::lifecycle::history]] [::lifecycle_fixture::value fresh_start]
+} -result {steam 1 1 1}
+
+test stage-1 {Stage advance needs both verified installed capability and current native availability} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set a [::lifecycle_fixture::active {stage_advance_available 1 stage_name {Long native stage}}]
+    set b [::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name {Long native stage}}]
+    list [dict get $a stage_advance_available] [dict get $b stage_advance_available] [dict get $b stage_name]
+} -result {0 1 {Long native stage}}
+
+test stage-2 {Stage intent changes neither mode nor observed stage and duplicate taps are fenced} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Preinfusion}
+} -body {
+    set first [::aiden::lifecycle::request stage-advance]
+    set repeat [::aiden::lifecycle::request stage-advance]
+    list [dict get $first accepted] [dict get $repeat accepted] [::lifecycle_fixture::value stage_name] \
+        [::lifecycle_fixture::value mode] [::lifecycle_fixture::value primary_action]
+} -result {1 0 Preinfusion espresso stop}
+
+test stage-3 {Native stage feedback acknowledges advance but a simultaneous Stop keeps priority} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Preinfusion}
+    ::aiden::lifecycle::request stage-advance
+    ::aiden::lifecycle::request stop
+} -body {
+    set p [::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Extracting}]
+    list [dict get $p phase] [dict get $p stage_name] [dict get $p stage_advance_available] [dict get $p primary_action]
+} -result {stop-requested Extracting 0 stop}
+
+test stage-4 {Native stage rejection preserves stage and exposes its reason} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Preinfusion}
+    ::aiden::lifecycle::request stage-advance
+} -body {
+    set p [::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Preinfusion \
+        stage_advance_rejected 1 stage_advance_reason {No next stage}}]
+    list [dict get $p stage_name] [dict get $p reason] [dict get $p stage_advance_pending]
+} -result {Preinfusion {No next stage} 0}
+
+test tare-1 {Live tare requests do not reset values, time, or native state} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set before [::aiden::lifecycle::presentation]
+    set response [::aiden::lifecycle::request tare]
+    list [dict get $response accepted] [::lifecycle_fixture::value can_tare] \
+        [expr {$before eq [::aiden::lifecycle::presentation]}] $::lifecycle_fixture::hardware_calls
+} -result {0 0 1 {}}
+
+test specialist-1 {Native specialist activity blocks new modes and retains the Stop affordance} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot {state clean mode {} ready 0}]]
+    list [dict get $p phase] [dict get $p primary_action] [dict get $p can_select_mode] \
+        [dict get [::aiden::lifecycle::request start] accepted]
+} -result {unknown-or-blocked stop 0 0}
+
+test workflow-6 {Persisted custom ordering is consumed exactly and handoff still requires a fresh Start} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::configure_workflow latte {mode_order {espresso steam water flush} skipped_modes flush}
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set p [::aiden::lifecycle::presentation]
+    ::aiden::lifecycle::complete_hold
+    list [dict get $p workflow_order] [dict get $p workflow_modes] [::lifecycle_fixture::value mode] \
+        [::lifecycle_fixture::value fresh_start] $::lifecycle_fixture::hardware_calls
+} -result {{espresso steam water flush} {espresso steam water} steam 1 {}}
+
+test workflow-7 {Reset accepts a validated custom order and native water aliases} -body {
+    set p [::aiden::lifecycle::reset {workflow americano mode_order {espresso hotwater flush} skipped_modes flush}]
+    list [dict get $p mode_order] [dict get $p workflow_modes] [dict get $p primary_action]
+} -result {{espresso water flush} {espresso water} wait}
+
+test workflow-8 {Duplicate, unsupported, and non-espresso-first orders reject atomically} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set before [::aiden::lifecycle::presentation]
+    set failures {}
+    foreach order {{espresso steam steam} {espresso hotwater water} {espresso cleaning} {steam espresso} {}} {
+        lappend failures [catch {::aiden::lifecycle::configure_workflow latte [dict create mode_order $order]}]
+    }
+    list $failures [expr {$before eq [::aiden::lifecycle::presentation]}]
+} -result {{1 1 1 1 1} 1}
+
+test workflow-9 {Skip validation agrees with saved workflow schema and stays atomic} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set before [::aiden::lifecycle::presentation]
+    set failures {}
+    foreach skipped {{flush flush} water espresso cleaning} {
+        lappend failures [catch {::aiden::lifecycle::configure_workflow latte [dict create skipped_modes $skipped]}]
+    }
+    list $failures [expr {$before eq [::aiden::lifecycle::presentation]}]
+} -result {{1 1 1 1} 1}
+
+test workflow-10 {The retained espresso record keeps its Saved status through an unsaved flush operation} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    ::aiden::lifecycle::continue
+    ::aiden::lifecycle::request start
+    ::lifecycle_fixture::active {state hot_water_rinse mode flush operation_id flush:2}
+} -body {
+    set p [::lifecycle_fixture::finalized {mode flush operation_id flush:2 result_id flush:2 history_id {} result_saved 0}]
+    list [dict get $p result mode] [dict get $p result_saved] [dict get $p result_state] \
+        [dict get $p operation_result mode] [dict get $p operation_result_saved] [dict get $p operation_result_state]
+} -result {espresso 1 Saved flush 0 Complete}
+
+test workflow-11 {Verified ordinary flush completion permits a UI hold without requiring espresso history} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    ::aiden::lifecycle::continue
+    ::aiden::lifecycle::request start
+    ::lifecycle_fixture::active {state hot_water_rinse mode flush operation_id flush:2}
+} -body {
+    set p [::lifecycle_fixture::finalized {mode flush operation_id flush:2 result_id flush:2 history_id {} result_saved 0}]
+    set hold [::aiden::lifecycle::complete_hold]
+    list [dict get $p auto_handoff_available] [dict get $p operation_result_state] [dict get $hold accepted] \
+        [::lifecycle_fixture::value mode] [::lifecycle_fixture::value fresh_start] [llength [::aiden::lifecycle::history]] \
+        $::lifecycle_fixture::hardware_calls
+} -result {1 Complete 1 steam 1 1 {}}
+
+test workflow-12 {An unclassified non-espresso completion still requires explicit continuation} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::select_mode flush
+    ::aiden::lifecycle::request start
+    ::lifecycle_fixture::active {state hot_water_rinse mode flush operation_id flush:2}
+} -body {
+    set p [::lifecycle_fixture::finalized {mode flush operation_id flush:2 result_id flush:2 history_id {} result_saved 0 outcome unknown}]
+    list [dict get $p auto_handoff_available] [dict get [::aiden::lifecycle::complete_hold] accepted] \
+        [dict get $p primary_action] [dict get [::aiden::lifecycle::continue] accepted] [::lifecycle_fixture::value mode]
+} -result {0 0 continue 1 steam}
+
+test request-5 {Cached preceding completion cannot finalize a fresh Start before native observation} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    ::aiden::lifecycle::continue
+    ::aiden::lifecycle::request start
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_reconciled 0 final_weight 90}]
+    list [dict get $p phase] [dict get $p flow_confirmed] [dict get $p result_finalized] \
+        [dict get $p elapsed] [dict get $p primary_action] [llength [::aiden::lifecycle::history]]
+} -result {start-requested 0 0 {} stop 1}
+
+test request-6 {A bare completion flag also cannot acknowledge a first pending Start} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    set p [::lifecycle_fixture::finalized {final_result {} operation_reconciled 0}]
+    list [dict get $p phase] [dict get $p result_finalized] [llength [::aiden::lifecycle::history]]
+} -result {start-requested 0 0}
+
+test request-7 {Native command uncertainty remains unknown delivery and never becomes Ready} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    set p [::aiden::lifecycle::ingest [::lifecycle_fixture::snapshot \
+        {pending_request {action start status uncertain mode espresso} operation_reconciled 0}]]
+    list [dict get $p phase] [dict get $p primary_action] [dict get [::aiden::lifecycle::request start] accepted]
+} -result {unknown-or-blocked stop 0}
+
+test request-8 {An identified native completion can reconcile a short operation missed between polls} -setup {
+    ::lifecycle_fixture::ready
+    ::aiden::lifecycle::request start
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_reconciled 1 \
+        final_result {operation_id espresso:1 mode espresso recipe {profile_title {Actual short shot} dose 18} final_elapsed 2.5} \
+        final_elapsed 2.5}]
+    list [dict get $p phase] [dict get $p result profile_title] [dict get $p result elapsed] \
+        [dict get $p auto_handoff_available] [llength [::aiden::lifecycle::history]]
+} -result {result {Actual short shot} 2.5 0 1}
+
+test connection-4 {Disconnected native Sleep cannot override the unknown connection condition} -body {
+    ::aiden::lifecycle::reset
+    set p [::aiden::lifecycle::ingest {state sleep native_state Sleep connected 0 ready 0}]
+    list [dict get $p phase] [dict get $p status] [dict get $p primary_action]
+} -result {unknown-or-blocked {Connection lost} wait}
+
+test connection-5 {A connected native fatal error retains Stop and never looks ready} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::active {state fatal_error mode {} ready 1}]
+    list [dict get $p phase] [dict get $p status] [dict get $p primary_action]
+} -result {unknown-or-blocked {Machine fault} stop}
+
+test ordering-6 {Unmatched completion without an exact final record cannot attach to an earlier shot} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_id espresso:2 final_result {}}]
+    list [dict get $p phase] [dict get $p operation_id] [dict get $p result_finalized] [llength [::aiden::lifecycle::history]]
+} -result {active espresso:1 0 0}
+
+test ordering-7 {A missed external start recovers an identified native record without changing prior history} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set first [::aiden::lifecycle::result]
+    set p [::lifecycle_fixture::finalized {operation_id espresso:2 result_id espresso:2 history_id native-shot-2 \
+        final_elapsed 30.5 final_weight 40 final_result {operation_id espresso:2 mode espresso \
+            recipe {profile_title {Recovered second} dose 20 target_yield 40 target_temp 92} final_elapsed 30.5}}]
+    list [llength [::aiden::lifecycle::history]] [dict get $p result profile_title] \
+        [expr {$first eq [lindex [::aiden::lifecycle::history] 1]}] [dict get $p auto_handoff_available]
+} -result {2 {Recovered second} 1 0}
+
+test ordering-8 {An exact completed identity with contradictory active feedback retains a reachable Stop} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set p [::lifecycle_fixture::active]
+    list [dict get $p phase] [dict get $p primary_action] [dict get $p stop_available] \
+        [dict get $p can_select_mode] [llength [::aiden::lifecycle::history]]
+} -result {unknown-or-blocked stop 1 0 1}
+
+test result-9 {Save acknowledgement with a different final-record identity cannot change the current result status} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized {result_saved 0 history_id {} save_error {Not saved}}
+} -body {
+    set p [::lifecycle_fixture::finalized {result_saved 1 result_id espresso:99 history_id unrelated-shot}]
+    list [dict get $p result_saved] [dict get $p result_state] [dict get $p result_save_error] \
+        [dict get $p auto_handoff_available]
+} -result {0 Unsaved {Not saved} 0}
+
+test result-10 {Unidentified finalization cannot claim a native history save from a bare boolean} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {operation_id {}}
+} -body {
+    set p [::lifecycle_fixture::finalized {operation_id {}}]
+    list [dict get $p result_saved] [dict get $p result_save_error] [dict get $p auto_handoff_available]
+} -result {0 {Native result identity unconfirmed} 0}
+
+test result-11 {The optional hold requires a saved espresso record identity as well as normal outcome} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+} -body {
+    set p [::lifecycle_fixture::finalized {history_id {}}]
+    list [dict get $p result_saved] [dict get $p auto_handoff_available] \
+        [dict get [::aiden::lifecycle::complete_hold] accepted]
+} -result {1 0 0}
+
+test result-12 {The native operation recipe preserves advanced data even when current settings already changed} -setup {
+    ::lifecycle_fixture::ready
+} -body {
+    set p [::lifecycle_fixture::active {profile_title {Future title} dose 25 \
+        operation_recipe {profile_title {Native frozen} profile_id native dose 18 target_yield 36 target_temp 93 \
+            profile_type settings_2c advanced_shot {{name Bloom seconds 10 temperature 92} {name Pour seconds 20 temperature 94}}}}]
+    ::lifecycle_fixture::finalized
+    set shot [::aiden::lifecycle::result]
+    list [dict get $p profile_title] [dict get $shot profile_title] [dict get $shot recipe profile_type] \
+        [llength [dict get $shot recipe advanced_shot]]
+} -result {{Native frozen} {Native frozen} settings_2c 2}
+
+test handoff-4 {Reset never reuses a presentation identity and an older hold cannot advance a new result} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+} -body {
+    set old [dict get [::aiden::lifecycle::operation_result] id]
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active
+    ::lifecycle_fixture::finalized
+    set new [dict get [::aiden::lifecycle::operation_result] id]
+    list [expr {$old ne $new}] [dict get [::aiden::lifecycle::complete_hold $old] accepted] \
+        [::lifecycle_fixture::value phase]
+} -result {1 0 result}
+
+test stage-5 {Native stage numbers acknowledge repeated textual stage names without inventing a stage} -setup {
+    ::lifecycle_fixture::ready
+    ::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Pour stage_number 2}
+    ::aiden::lifecycle::request stage-advance
+} -body {
+    set p [::lifecycle_fixture::active {stage_advance_verified 1 stage_advance_available 1 stage_name Pour stage_number 3}]
+    list [dict get $p stage_name] [dict get $p stage_advance_pending] [dict get $p stage_advance_available]
+} -result {Pour 0 1}
+
+test pure-1 {No exercised path invokes hardware, persistence, or a lifecycle timer} -body {
+    set f [open [file join [file dirname [info script]] .. aiden lifecycle.tcl] r]
+    set source [read $f]
+    close $f
+    list $::lifecycle_fixture::hardware_calls [regexp {(?m)^\s*after\s} $source] \
+        [regexp {(?m)^\s*(start_espresso|start_idle|start_flush|start_steam|start_water|save_espresso_to_history)\s} $source]
+} -result {{} 0 0}
+
+cleanupTests

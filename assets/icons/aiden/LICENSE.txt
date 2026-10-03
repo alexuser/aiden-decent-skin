@@ -1,0 +1,5 @@
+Copyright (c) 2026 Aiden contributors.
+SPDX-License-Identifier: GPL-3.0-only
+
+These project-owned SVG icons are licensed under GNU GPL version 3 only.
+See ../../../COPYING for the complete license.

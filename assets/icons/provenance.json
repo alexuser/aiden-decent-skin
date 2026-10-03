@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-10-03T04:52:37.719390+00:00",
+  "icons": [
+    {
+      "file": "aiden/advance.svg",
+      "sha256": "f7b89b237088586885029573f7a9367ce2d6b4c42739218c1f12fd6bc6d3e1db",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/apply.svg",
+      "sha256": "3a5f18b936228bb8c46bc7e21913323cac53762650488554e1e2ed5820ca8419",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/back.svg",
+      "sha256": "b4c112c16d9eed704d4bf0ff5d7e1c64d3de8b227b5621f4cc70c06eff86e7f7",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/down.svg",
+      "sha256": "a96bed440caca4eaf68e8d8390e90aee691f9eba6fc8c2ce79604f1ed966a976",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/espresso.svg",
+      "sha256": "829c396b4f2bc237208fe350234cf03e18d0547fb1415b1fc15918f94804c619",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/graph-options.svg",
+      "sha256": "e504584b2d77d5b399252c3eafee7d24f6a8daa934c882d0f903bd4cd60f435d",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/history.svg",
+      "sha256": "f4e905aed32c4ed14f59f6939e9a0d415425ac560f7b26827fa71e8c965cb1be",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/play.svg",
+      "sha256": "eada8226b91ba78fe8d79e95c57a902793c32e75c4b5a222a5ddb69fcf86952c",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/reconnect.svg",
+      "sha256": "b6e229826eef79324a0f0602385cab3baaeb34370fd6bcccadbbce163ef2688c",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/scale.svg",
+      "sha256": "400f999c3196db501d98e93298211889e05c5bda6ed8bbdd66d245df4710f9e8",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/search.svg",
+      "sha256": "3c9ec954a8d67139265b4aa27e33f11dc7bb18e04e2e269ab297b8ed7b75e0e1",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/steam.svg",
+      "sha256": "4dd2e802f5910f729a7934d3ed583141d6b8963717bb2dd504032a83103b14c0",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/stop.svg",
+      "sha256": "f24932bcd6afd5b1707c644f1602159184d7674acde47cb99a7f1e2ea68875ef",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/tare.svg",
+      "sha256": "b464c11ad9d1da13a7280cf8802bca03cdf8e3773b7030845603f52314a83589",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "aiden/water.svg",
+      "sha256": "e0d365fe389148f40112296c724fc52deec2c67c37b852f0c351d912e8d59992",
+      "license": "GPL-3.0-only",
+      "source": "Project-owned icon, release owner authorized GPLv3",
+      "upstream_url": null
+    },
+    {
+      "file": "phosphor/arrow-counter-clockwise.svg",
+      "sha256": "4eb160d5ae781107c674481ac081962e6bce6281a646129e6c3f960b9dd5dac6",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/arrow-right.svg",
+      "sha256": "e45bc4a12592b8723110db42c6deffdf177e4fe7704cf50324963fa0a59b2d74",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/arrows-out.svg",
+      "sha256": "f6cc35278b35b8bf1ab115ad65ad9925b75fc014eb47e81169a04cd24c6417fd",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/bookmark-simple.svg",
+      "sha256": "493a836009ab98f8d4ca84f088cc03f2785cdee86daa1643e003865ff3168b41",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/check.svg",
+      "sha256": "cbb89a8c42f283d4f846eb935e05d88c1be04462f16480e068c0f82b9ce40b12",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/gear-six.svg",
+      "sha256": "2bb05ec80cc37505a3f21c74989dbb297ab8442a668f5ffbd6a8f7c1d5794c7b",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/link.svg",
+      "sha256": "526d89480e3064c614b7d46a93888c187696d7776f684527d48eb94e2d7cd5d4",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/minus.svg",
+      "sha256": "5a068d1cfd707fde5ddb0ce0623958123b6a5afba98401318983aeb0fdad6382",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/moon.svg",
+      "sha256": "5c91f82aea4e7b53305bf29628caebc22a1198ba9fa46c62eef13fb8b3c3f21d",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/plus.svg",
+      "sha256": "d688feb9dd2e41c1721d6906a05a2a42e18cd774762fe706d72b2bdfd91cddc4",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/shower.svg",
+      "sha256": "945761a6736dc6b8014bebc460f98ce83ac73318d15e57619e807cc369768f14",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/thermometer.svg",
+      "sha256": "fbe42cf4910d02a41df98cd26044da36d706c347d4656b56ce343f67d2674cde",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/warning-circle.svg",
+      "sha256": "e48a90760a68659fd3f06dd9187e471aead4877c72e915339071b2c7f7bd714c",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    },
+    {
+      "file": "phosphor/x.svg",
+      "sha256": "7397b15e1fa66eaf6ff9b59fe91d483cb5c3bcf75b2fe052097ab6f0593b513a",
+      "license": "MIT",
+      "source": "Phosphor regular SVG; exact upstream revision not recorded",
+      "upstream_url": "https://github.com/phosphor-icons/core"
+    }
+  ]
+}
