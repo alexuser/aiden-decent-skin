@@ -21,6 +21,7 @@ namespace eval ::core_fixture {
     variable pages {aiden_home off settings_1 settings_3 settings_4 extensions descale_prepare history_viewer}
     variable legacy_pages {}
     variable legacy_backgrounds {}
+    variable now 1000000
     proc setup {} {
         variable calls; set calls {}
         variable registrations; set registrations {native_history_listener}
@@ -32,6 +33,7 @@ namespace eval ::core_fixture {
         variable pages; set pages {aiden_home off settings_1 settings_3 settings_4 extensions descale_prepare history_viewer}
         variable legacy_pages; set legacy_pages {}
         variable legacy_backgrounds; set legacy_backgrounds {}
+        variable now; set now 1000000
         set ::android 1
         set ::undroid 0
         array unset ::settings
@@ -56,8 +58,14 @@ namespace eval ::core_fixture {
         set ::aiden::core::completed_result {}
         set ::aiden::core::last_state_event {}
         set ::aiden::core::event_sequence 0
+        foreach name {request_context request_reconciliation transport_write transport_read transport_read_context transport_calls ble_calls verification_counts} {
+            set ::aiden::core::$name {}
+        }
+        foreach name {request_sequence transport_sequence connection_epoch} {set ::aiden::core::$name 0}
     }
     proc native_event {this sub previous old_sub time} {
+        variable now
+        set now [expr {max($now, int($time * 1000))}]
         foreach {num name} [array get ::de1_num_state] {
             if {$name eq $this} {set ::de1(state) $num}
         }
@@ -144,6 +152,12 @@ foreach name {page_show show_settings start_button_ready watertemp steamtemp pre
 set before_source_calls $::core_fixture::calls
 set before_source_registrations $::core_fixture::registrations
 source [file join [file dirname [info script]] .. core.tcl]
+# Keep source-provided native event times deterministic while testing request
+# freshness. Production continues to use the native millisecond clock.
+proc ::aiden::core::clock {args} {
+    if {$args eq {milliseconds}} {return $::core_fixture::now}
+    return [::clock {*}$args]
+}
 
 test source-1 {Sourcing does not dispatch, register listeners, or touch app state} -body {
     list [expr {$before_source_calls eq $::core_fixture::calls}] \
@@ -569,5 +583,308 @@ test routing-9 {Optional native history open is direct DUI navigation; it does n
 } -cleanup {
     interp delete $history_probe
 } -result {{page load history_viewer}}
+
+namespace eval ::transport_fixture {
+    variable sent {}
+    variable native_calls 0
+    variable next_return 1
+    proc setup {} {
+        ::core_fixture::setup
+        variable sent; set sent {}
+        variable native_calls; set native_calls 0
+        variable next_return; set next_return 1
+        package provide de1_comms 1.1
+        package provide de1_bluetooth 1.1
+        set ::de1(suuid) service
+        set ::de1(cuuid_02) requested_state
+        set ::de1(cuuid_0E) state_info
+        set ::de1(cmdstack) {}
+        set ::de1(wrote) 0
+        array set ::de1_state [list Idle \x02 Espresso \x04]
+        rename ::start_idle ::transport_fixture::saved_start_idle
+        proc ::start_idle {} {
+            lappend ::core_fixture::calls start_idle
+            userdata_append {go idle} [list de1_comm write RequestedState $::de1_state(Idle)] 1
+        }
+        proc ::userdata_append {comment cmd {vital 0}} {
+            lappend ::de1(cmdstack) [list $comment $cmd $vital]
+            ::transport_fixture::run_next
+        }
+        proc ::de1_comm {action command_name {value 0}} {
+            lappend ::transport_fixture::sent [list $action $command_name $value]
+            return $::transport_fixture::next_return
+        }
+        proc ::de1_ble_handler {event data} {
+            incr ::transport_fixture::native_calls
+            if {$event ne "characteristic" || [dict get $data state] ne "connected"} {return}
+            set access [dict get $data access]
+            if {$access in {w r}} {
+                set ::de1(wrote) 0
+                ::transport_fixture::run_next
+            }
+            if {$access in {r c} && [dict get $data cuuid] eq $::de1(cuuid_0E)} {
+                set value [dict get $data value]
+                if {[string length $value] != 2} {return}
+                binary scan $value cc state substate
+                set old $::de1_num_state($::de1(state))
+                set old_sub $::de1_substate_types($::de1(substate))
+                set ::de1(state) [expr {$state & 255}]
+                set ::de1(substate) [expr {$substate & 255}]
+                set this $::de1_num_state($::de1(state))
+                set sub $::de1_substate_types($::de1(substate))
+                if {$this ne $old || $sub ne $old_sub} {
+                    ::core_fixture::native_event $this $sub $old $old_sub \
+                        [expr {$::core_fixture::now / 1000.0}]
+                }
+            }
+        }
+        ::aiden::core::install_event_hooks
+    }
+    proc cleanup {} {
+        foreach api {::userdata_append ::de1_comm ::de1_ble_handler ::start_idle} {rename $api {}}
+        rename ::transport_fixture::saved_start_idle ::start_idle
+        package forget de1_comms de1_bluetooth
+        array unset ::de1_state
+    }
+    proc run_next {} {
+        if {$::de1(wrote) || $::de1(cmdstack) eq {}} {return}
+        set head [lindex $::de1(cmdstack) 0]
+        set rest [lrange $::de1(cmdstack) 1 end]
+        set ::de1(wrote) 1
+        set result [{*}[lindex $head 1]]
+        if {$result ne "1"} {set ::de1(wrote) 0; return}
+        set ::de1(cmdstack) $rest
+        set ::de1(previouscmd) [lindex $head 1]
+    }
+    proc packet {access value {handle 11} {cuuid {}}} {
+        if {$cuuid eq {}} {
+            set cuuid [expr {$access eq "w" ? "requested_state" : "state_info"}]
+        }
+        ::de1_ble_handler characteristic [dict create handle $handle state connected \
+            suuid service cuuid $cuuid access $access value $value]
+    }
+    proc stop_pending {} {
+        ::aiden::core::command start espresso
+        ::aiden::core::command stop
+    }
+}
+
+test reconciliation-1 {Cached Idle, repeated snapshots, and ACK alone do not reconcile a no-flow Stop} -setup {
+    ::transport_fixture::setup
+    ::core_fixture::native_event Idle ready Idle ready 999.0
+    ::transport_fixture::stop_pending
+} -body {
+    set pending [::aiden::core::snapshot]
+    ::aiden::core::snapshot
+    ::transport_fixture::packet w \x02
+    set acknowledged [::aiden::core::snapshot]
+    list [dict get $pending pending] [dict get $pending operation_reconciled] \
+        [dict get $acknowledged pending] [dict get $acknowledged operation_reconciled] \
+        $::transport_fixture::sent $::transport_fixture::native_calls
+} -cleanup {::transport_fixture::cleanup} -result [list stop 0 stop 0 [list [list write RequestedState \x02] [list read StateInfo 0]] 1]
+
+test reconciliation-2 {Unchanged Idle read after native Stop ACK safely cancels without inventing flow or result} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+    set s [::aiden::core::snapshot]
+    list [dict get $s pending] [dict get $s operation_reconciled] [dict get $s idle_verified] \
+        [dict get $s flow_confirmed] [dict get $s flow_ended] [dict get $s result_finalized] \
+        [dict get $s request_reconciliation source] $::core_fixture::calls $::transport_fixture::native_calls
+} -cleanup {::transport_fixture::cleanup} -result {{} 1 1 0 0 0 native_stop_ack_and_idle_read {start_espresso start_idle} 2}
+
+test reconciliation-3 {Native notification, pre-ACK read, and malformed read cannot substitute for the ordered Stop read} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet c \x02\x00
+    ::transport_fixture::packet r \x02\x00
+    set before [dict get [::aiden::core::snapshot] pending]
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02
+    list $before [dict get [::aiden::core::snapshot] pending] \
+        [dict get [::aiden::core::snapshot] operation_reconciled]
+} -cleanup {::transport_fixture::cleanup} -result {stop stop 0}
+
+test reconciliation-4 {Wrong write value or device handle cannot acknowledge this Stop} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet w \x04
+    ::transport_fixture::packet r \x02\x00
+    set wrong_value [dict get [::aiden::core::snapshot] pending]
+    ::aiden::core::command stop
+    ::transport_fixture::packet w \x02 22
+    ::transport_fixture::packet r \x02\x00
+    list $wrong_value [dict get [::aiden::core::snapshot] pending]
+} -cleanup {::transport_fixture::cleanup} -result {stop stop}
+
+test reconciliation-5 {A disconnect/reconnect never promotes an old Stop read to acknowledgement} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+    ::transport_fixture::packet w \x02
+} -body {
+    set ::de1(device_handle) 0
+    ::aiden::core::observe_disconnect
+    set ::de1(device_handle) 11
+    ::transport_fixture::packet r \x02\x00
+    list [dict get [::aiden::core::snapshot] pending] \
+        [dict get [::aiden::core::snapshot] operation_reconciled]
+} -cleanup {::transport_fixture::cleanup} -result {stop 0}
+
+test reconciliation-6 {A subsequent native state command invalidates the pending Stop read proof} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+    ::transport_fixture::packet w \x02
+    userdata_append {native next operation} [list de1_comm write RequestedState \x04] 1
+} -body {
+    ::transport_fixture::packet r \x02\x00
+    list [dict get [::aiden::core::snapshot] pending] \
+        [dict get [::aiden::core::snapshot] operation_reconciled] \
+        [lindex $::transport_fixture::sent end 1]
+} -cleanup {::transport_fixture::cleanup} -result {stop 0 RequestedState}
+
+test reconciliation-7 {Transport dispatch failure and retained cached Idle preserve pending uncertainty} -setup {
+    ::transport_fixture::setup
+    set ::transport_fixture::next_return 0
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+    list [dict get [::aiden::core::snapshot] pending] \
+        [dict get [::aiden::core::snapshot] operation_reconciled]
+} -cleanup {::transport_fixture::cleanup} -result {stop 0}
+
+test reconciliation-8 {A queued old read cannot clear a newer Stop request} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+    ::transport_fixture::packet w \x02
+    ::aiden::core::command stop
+} -body {
+    ::transport_fixture::packet r \x02\x00
+    set old [dict get [::aiden::core::snapshot] pending]
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+    list $old [dict get [::aiden::core::snapshot] pending] \
+        [dict get [::aiden::core::snapshot] operation_reconciled]
+} -cleanup {::transport_fixture::cleanup} -result {stop {} 1}
+
+test reconciliation-9 {Canceling a pending next Start never relabels the prior finalized result} -setup {
+    ::transport_fixture::setup
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+    set s [::aiden::core::snapshot]
+    list [dict get $s pending] [dict get $s operation_reconciled] [dict get $s operation_id] \
+        [dict get $s flow_confirmed] [dict get $s result_finalized] [dict get $s final_result]
+} -cleanup {::transport_fixture::cleanup} -result {{} 1 {} 0 0 {}}
+
+test reconciliation-10 {Delayed pre-request Idle callback cannot acknowledge Stop; observers remain additive and idempotent} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    ::core_fixture::native_event Idle ready Idle ready 999.0
+    ::aiden::core::install_event_hooks
+    set traces [trace info execution ::de1_ble_handler]
+    list [dict get [::aiden::core::snapshot] pending] [llength $traces] \
+        [dict get [::aiden::core::snapshot] stop_reconciliation_verified] \
+        $::transport_fixture::native_calls
+} -cleanup {::transport_fixture::cleanup} -result {stop 1 1 0}
+
+test reconciliation-11 {The real lifecycle returns a canceled no-flow request to preparation without dispatching again} -setup {
+    ::transport_fixture::setup
+    source [file join [file dirname [info script]] .. lifecycle.tcl]
+    ::aiden::lifecycle::reset
+    ::aiden::lifecycle::ingest [::aiden::core::snapshot]
+} -body {
+    set start [::aiden::lifecycle::request start]
+    ::aiden::core::command start espresso
+    ::aiden::lifecycle::ingest [::aiden::core::snapshot]
+    set stop [::aiden::lifecycle::request stop]
+    ::aiden::core::command stop
+    set pending [::aiden::lifecycle::ingest [::aiden::core::snapshot]]
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+    set prepared [::aiden::lifecycle::ingest [::aiden::core::snapshot]]
+    list [dict get $start accepted] [dict get $stop accepted] [dict get $pending phase] \
+        [dict get $prepared phase] [dict get $prepared primary_action] \
+        [dict get $prepared primary_enabled] $::core_fixture::calls
+} -cleanup {::transport_fixture::cleanup} -result {1 1 stop-requested prepared start 1 {start_espresso start_idle}}
+
+test navigation-stop-1 {Real core utilities stay locked before Stop proof and after write ACK alone} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    set rejected {}
+    foreach target {app history original} {
+        lappend rejected [catch {::aiden::core::route $target} problem]
+        if {$problem ne {Waiting for machine confirmation of Stop; navigation is locked}} {error $problem}
+    }
+    ::transport_fixture::packet w \x02
+    lappend rejected [catch {::aiden::core::route history} problem]
+    list $rejected $problem $::core_fixture::calls
+} -cleanup {::transport_fixture::cleanup} -result {{1 1 1 1} {Waiting for machine confirmation of Stop; navigation is locked} {start_espresso start_idle}}
+
+test navigation-stop-2 {Real core navigation unlocks only after valid Stop proof and keeps native settings untouched} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x00
+} -body {
+    set before [lsort [array get ::settings]]
+    ::aiden::core::route history
+    ::aiden::core::route original
+    list [expr {$before eq [lsort [array get ::settings]]}] $::core_fixture::calls \
+        [dict get [::aiden::core::snapshot] pending]
+} -cleanup {::transport_fixture::cleanup} -result {1 {start_espresso start_idle {navigation history_viewer} {navigation off}} {}}
+
+test navigation-stop-3 {Disconnect and stale reconnect proof never unlock real core utilities} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+    ::transport_fixture::packet w \x02
+} -body {
+    set ::de1(device_handle) 0
+    ::aiden::core::observe_disconnect
+    set disconnected [catch {::aiden::core::route app}]
+    set ::de1(device_handle) 11
+    ::transport_fixture::packet r \x02\x00
+    list $disconnected [catch {::aiden::core::route history}] \
+        [dict get [::aiden::core::snapshot] pending] $::core_fixture::calls
+} -cleanup {::transport_fixture::cleanup} -result {1 1 stop {start_espresso start_idle}}
+
+test verification-diagnostic-1 {Snapshot diagnostics are booleans/counts only and cannot advance pending Stop} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    set before [list [lsort [array get ::de1]] [lsort [array get ::settings]] $::transport_fixture::sent]
+    set a [dict get [::aiden::core::snapshot] stop_verification]
+    set b [dict get [::aiden::core::snapshot] stop_verification]
+    set numeric 1
+    dict for {key value} $a {if {$value ne {} && ![string is integer -strict $value]} {set numeric 0}}
+    set unchanged [expr {$before eq [list [lsort [array get ::de1]] [lsort [array get ::settings]] $::transport_fixture::sent]}]
+    list [expr {$a eq $b}] $numeric $unchanged [dict get $a enqueue_seen] \
+        [dict get $a write_accepted] [dict get $a write_acknowledged] [dict get $a fence_queued] \
+        [dict get [::aiden::core::snapshot] pending]
+} -cleanup {::transport_fixture::cleanup} -result {1 1 1 1 1 0 1 stop}
+
+test verification-diagnostic-2 {Unknown empty ACK is diagnosed without weakening Stop identity or navigation guards} -setup {
+    ::transport_fixture::setup
+    ::transport_fixture::stop_pending
+} -body {
+    ::transport_fixture::packet w {}
+    ::transport_fixture::packet r \x02\x00
+    set s [::aiden::core::snapshot]
+    set diag [dict get $s stop_verification]
+    list [dict get $diag requested_state_ack_seen] [dict get $diag ack_value_length] \
+        [dict get $diag ack_payload_matches] [dict get $diag ack_serial_matches] \
+        [dict get $diag fence_armed] [dict get $diag proof_confirmed] [dict get $s pending] \
+        [catch {::aiden::core::route original}]
+} -cleanup {::transport_fixture::cleanup} -result {1 0 0 1 0 0 stop 1}
 
 cleanupTests

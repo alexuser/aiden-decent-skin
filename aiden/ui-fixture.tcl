@@ -89,6 +89,7 @@ proc ::fixture::widget {name args} {
 }
 proc .can {args} {
     if {[lindex $args 0] eq {coords}} {return {0 0}}
+    if {[lindex $args 0] eq {itemconfigure}} {set ::fixture::canvas_options([lindex $args 1]) [lrange $args 2 end]}
     return {}
 }
 namespace eval ::dui::platform {}
@@ -402,4 +403,51 @@ assert {[::aiden::ui::mount_pending_stop]==2} {Native GHC Stop overlays did not 
 assert {[::aiden::ui::mount_pending_stop]==2} {Native GHC Stop overlays were not idempotent}
 set ghc_stop [dict get $::fixture::commands ghc_espresso,aiden_pending_stop_hit]
 assert {$ghc_stop eq {::aiden::ui::dispatch stop}} {Native pending Stop did not use the explicit dispatcher}
-puts "PASS: 9 pages, $items_before native items, [dict size $::fixture::commands] controls, [llength $::fixture::actions] dispatches; live recipe arithmetic and commit precision, exact native tag families, disabled taps, readiness dots, drafts, stable IDs, native units, unavailable sensors, BLT gap segmentation and Stop visibility verified."
+::aiden::ui::render $snapshot
+::aiden::ui::show profiles
+set ::fixture::hidden_render_calls 0
+proc ::fixture::count_hidden_render {args} {incr ::fixture::hidden_render_calls}
+foreach api {::aiden::ui::render_home_layout ::aiden::ui::set_graph} {
+    trace add execution $api enter ::fixture::count_hidden_render
+}
+for {set i 0} {$i < 10} {incr i} {::aiden::ui::render $snapshot}
+assert {$::fixture::hidden_render_calls == 0} {Profile browsing redrew hidden operating graphs/layout}
+::aiden::ui::render [dict replace $snapshot phase active busy 1 stop_available 1]
+assert {$::aiden::ui::current_page eq {aiden_home}} {Render optimization hid a newly active operation}
+assert {$::fixture::hidden_render_calls > 0} {Active operation did not refresh its operating screen}
+foreach api {::aiden::ui::render_home_layout ::aiden::ui::set_graph} {
+    trace remove execution $api enter ::fixture::count_hidden_render
+}
+::aiden::ui::render $snapshot
+::aiden::ui::show profiles
+::aiden::ui::search_layout 1
+assert {[::fixture::state aiden_profiles aiden_search_done] eq {normal}} {Keyboard-safe Done control is not visible}
+assert {[::fixture::state aiden_profiles aiden_preview_title] eq {hidden}} {Preview collides with keyboard-safe search controls}
+set list_id [lindex [dui item get aiden_profiles aiden_profile_list] 0]
+assert {[dict get $::fixture::canvas_options($list_id) -height] == 157.5} {Search results do not fit above the tested keyboard}
+::aiden::ui::search_layout 0
+assert {[dict get $::fixture::canvas_options($list_id) -height] == 498.75} {Search list height did not restore}
+assert {[::fixture::state aiden_profiles aiden_preview_title] eq {normal}} {Preview did not restore after search}
+set ::aiden::ui::query unlikely_no_profile_matches_this_text
+::aiden::ui::render_catalog
+assert {$::aiden::ui::selected_id eq {}} {Empty filter retained a stale selected profile}
+assert {$::aiden::ui::data(preview_title) eq {Select a profile}} {Empty filter retained a stale preview}
+assert {[::fixture::state aiden_profiles aiden_profiles_use] eq {disabled}} {Empty filter permits Apply}
+set action_count [llength $::fixture::actions]
+::aiden::ui::commit_profile
+assert {[llength $::fixture::actions] == $action_count} {Empty selection dispatched a profile application}
+::aiden::ui::set_mode_settings water [dict create fields [list [dict create key water_volume value 50 unit {} units [list {}] available 0]] values [dict create water_volume 50]]
+assert {$::aiden::ui::data(mode_field_0_value) eq {Unavailable}} {Unknown water unit exposed an internal placeholder or guessed a unit}
+# Exercise actual fit_font control flow with deterministic pixel metrics.
+rename ::aiden::ui::font ::aiden::ui::fixture_saved_font
+proc ::aiden::ui::font {size args} {return $size}
+proc ::font {method font args} {
+    if {$method eq {measure}} {return [expr {[string length [lindex $args 0]]*$font}]}
+    return $font
+}
+set fitted [::aiden::ui::fit_font abcdefghijklmnopqrst 100 50 20 8]
+assert {$fitted < 20} {An unbroken title incorrectly fits on one line}
+rename ::font {}
+rename ::aiden::ui::font {}
+rename ::aiden::ui::fixture_saved_font ::aiden::ui::font
+puts "PASS: 9 pages, $items_before native items, [dict size $::fixture::commands] controls; graph/Stop, hidden rendering, keyboard-safe search, empty-preview, unknown-unit and unbroken-title checks."

@@ -10,6 +10,17 @@ namespace eval ::aiden::core {
     variable completed_result {}
     variable event_sequence 0
     variable last_state_event {}
+    variable request_sequence 0
+    variable request_context {}
+    variable request_reconciliation {}
+    variable transport_sequence 0
+    variable transport_write {}
+    variable transport_read {}
+    variable transport_read_context {}
+    variable transport_calls {}
+    variable ble_calls {}
+    variable connection_epoch 0
+    variable verification_counts {}
 }
 
 proc ::aiden::core::_read {name {fallback {}}} {
@@ -258,6 +269,8 @@ proc ::aiden::core::snapshot {} {
     variable completed_result
     variable event_sequence
     variable last_state_event
+    variable request_reconciliation
+    variable hook_flags
     set native [_native_state]
     set substate [_native_substate]
     set mode [_mode $native]
@@ -288,6 +301,12 @@ proc ::aiden::core::snapshot {} {
     if {$retain_operation && $pending_request ne {} && \
         [dict exists $pending_request new_operation] && [dict get $pending_request new_operation] && \
         [dict get $operation flow_ended]} {set retain_operation 0}
+    if {$retain_operation && $request_reconciliation ne {} && \
+        [dict get $request_reconciliation new_operation] && [dict get $operation flow_ended]} {
+        # Canceling the next request must not republish the previous result as
+        # though it belongs to the canceled operation.
+        set retain_operation 0
+    }
     if {$retain_operation} {
         set id [dict get $operation operation_id]
         set flow_confirmed [expr {$flow_confirmed || [dict get $operation flow_confirmed]}]
@@ -360,12 +379,24 @@ proc ::aiden::core::snapshot {} {
         final_result {} result_id {} history_id {} result_saved 0 save_error {} \
         final_weight {} final_elapsed {} final_weight_quality unavailable \
         current_state_verified 0 idle_verified 0 operation_reconciled 0]
+    dict set s stop_reconciliation_verified [expr {[_transport_hooks_available] &&
+        [dict exists $hook_flags ::userdata_append] && [dict exists $hook_flags ::de1_comm] &&
+        [dict exists $hook_flags ::de1_ble_handler]}]
+    dict set s stop_verification [_stop_verification]
+    dict set s request_reconciliation $request_reconciliation
     if {$connected && $last_state_event ne {} && \
         [dict get $last_state_event this_state] eq $native && \
         [dict get $last_state_event this_substate] eq $substate} {
         dict set s current_state_verified 1
         dict set s idle_verified [expr {$native eq "Idle"}]
         dict set s operation_reconciled [expr {$native eq "Idle" && $pending_request eq {}}]
+    }
+    if {$connected && $native eq "Idle" && $pending_request eq {} && $request_reconciliation ne {}} {
+        dict set s current_state_verified 1
+        dict set s idle_verified 1
+        dict set s operation_reconciled 1
+        dict set s request_action stop
+        dict set s request_outcome reconciled
     }
     if {$completed_result ne {} && $id ne {} && [dict get $completed_result operation_id] eq $id} {
         dict set s final_result $completed_result
@@ -380,6 +411,8 @@ proc ::aiden::core::_begin_operation {native event} {
     variable observed_operation
     variable completed_result
     variable pending_request
+    variable request_reconciliation
+    set request_reconciliation {}
     set type [_read ::settings(settings_profile_type)]
     set target_field [expr {$type in {settings_2c settings_2c2} ? \
         "final_desired_shot_weight_advanced" : "final_desired_shot_weight"}]
@@ -424,17 +457,27 @@ proc ::aiden::core::observe_state {event} {
     }
     if {$pending_request ne {}} {
         set action [dict get $pending_request action]
+        set fresh [expr {![dict exists $pending_request request_time] ||
+            [dict get $event event_time] > [dict get $pending_request request_time]}]
         if {($action eq "start" && [_mode $this] eq [dict get $pending_request mode]) || \
-            ($action eq "stop" && [_mode $this] eq {} && $this in {Idle Sleep}) || \
-            ($action eq "sleep" && $this eq "Sleep") || \
-            ($action eq "wake" && $this eq "Idle")} {set pending_request {}}
+            ($fresh && $action eq "stop" && [_mode $this] eq {} && $this in {Idle Sleep}) || \
+            ($fresh && $action eq "sleep" && $this eq "Sleep") || \
+            ($fresh && $action eq "wake" && $this eq "Idle")} {set pending_request {}}
     }
 }
 
 proc ::aiden::core::observe_disconnect {args} {
     variable last_state_event
     variable event_sequence
+    variable connection_epoch
+    variable transport_read
+    variable transport_write
+    variable request_reconciliation
     set last_state_event {}
+    incr connection_epoch
+    set transport_read {}
+    set transport_write {}
+    set request_reconciliation {}
     incr event_sequence
     # Preserve pending and last operation; a disconnect is never completion.
 }
@@ -513,11 +556,273 @@ proc ::aiden::core::install_event_hooks {} {
             dict set hook_flags $registrar 1
         }
     }
+    # Native StateInfo reads with an unchanged value do not emit a state-change
+    # event. Add read-only execution observers to the exact inspected transport
+    # entry points; preserve their names, bodies, callbacks, and return values.
+    if {[_transport_hooks_available]} {
+        foreach {api operations callback} {
+            ::userdata_append enter ::aiden::core::_queue_trace
+            ::de1_comm {enter leave} ::aiden::core::_comm_trace
+            ::de1_ble_handler {enter leave} ::aiden::core::_ble_trace
+        } {
+            if {![dict exists $hook_flags $api]} {
+                if {[lsearch -exact [trace info execution $api] [list $operations $callback]] < 0} {
+                    trace add execution $api $operations $callback
+                }
+                dict set hook_flags $api 1
+            }
+        }
+    }
     return $hook_flags
+}
+
+proc ::aiden::core::_transport_hooks_available {} {
+    if {![string is true -strict [_read ::android]] ||
+        [package provide de1_comms] ne "1.1" || [package provide de1_bluetooth] ne "1.1"} {return 0}
+    foreach api {::userdata_append ::de1_comm ::de1_ble_handler} {
+        if {![_has $api]} {return 0}
+    }
+    return 1
+}
+
+proc ::aiden::core::_idle_payload {payload} {
+    if {[string length $payload] != 1 || ![info exists ::de1_state(Idle)]} {return 0}
+    return [expr {$payload eq $::de1_state(Idle)}]
+}
+
+proc ::aiden::core::_verification_count {key} {
+    variable verification_counts
+    dict incr verification_counts $key
+}
+
+proc ::aiden::core::_stop_verification {} {
+    variable hook_flags
+    variable pending_request
+    variable transport_write
+    variable transport_read
+    variable verification_counts
+    set diag [dict create transport_supported [_transport_hooks_available] pending_stop 0 \
+        enqueue_seen 0 write_present [expr {$transport_write ne {}}] write_accepted 0 \
+        write_acknowledged 0 write_is_idle 0 read_present [expr {$transport_read ne {}}] \
+        read_matches_request 0 read_matches_write 0 queue_known 0 queue_length {} wrote {}]
+    foreach {key api} {queue ::userdata_append dispatch ::de1_comm callback ::de1_ble_handler} {
+        dict set diag ${key}_hook [dict exists $hook_flags $api]
+        set count 0
+        if {[_has $api] && ![catch {trace info execution $api} observers]} {set count [llength $observers]}
+        dict set diag ${key}_trace_count $count
+    }
+    if {$pending_request ne {} && [dict get $pending_request action] eq "stop"} {
+        dict set diag pending_stop 1
+        dict set diag enqueue_seen [expr {[dict exists $pending_request stop_enqueued] &&
+            [dict get $pending_request stop_enqueued]}]
+        if {$transport_read ne {} && [dict exists $pending_request id]} {
+            dict set diag read_matches_request [expr {[dict get $transport_read id] eq [dict get $pending_request id]}]
+        }
+    }
+    if {$transport_write ne {}} {
+        dict set diag write_accepted [dict get $transport_write accepted]
+        dict set diag write_acknowledged [dict get $transport_write acknowledged]
+        dict set diag write_is_idle [_idle_payload [dict get $transport_write payload]]
+        if {$transport_read ne {}} {
+            dict set diag read_matches_write [expr {[dict get $transport_read write_ticket] eq [dict get $transport_write ticket]}]
+        }
+    }
+    if {[info exists ::de1(cmdstack)] && ![catch {llength $::de1(cmdstack)} length]} {
+        dict set diag queue_known 1
+        dict set diag queue_length $length
+    }
+    if {[string is boolean -strict [_read ::de1(wrote)]]} {dict set diag wrote [_boolean [_read ::de1(wrote)]]}
+    foreach key {queue_trace_errors dispatch_trace_errors callback_trace_errors fence_queued fence_armed read_received proof_confirmed} {
+        dict set diag $key [expr {[dict exists $verification_counts $key] ? [dict get $verification_counts $key] : 0}]
+    }
+    dict set diag requested_state_ack_seen [expr {[dict exists $verification_counts requested_state_ack_seen] ?
+        [dict get $verification_counts requested_state_ack_seen] : 0}]
+    foreach key {ack_value_length ack_payload_matches ack_serial_matches} {
+        dict set diag $key [expr {[dict exists $verification_counts $key] ? [dict get $verification_counts $key] : ""}]
+    }
+    return $diag
+}
+
+proc ::aiden::core::_write_is_inflight {} {
+    variable transport_write
+    if {$transport_write eq {} || ![dict get $transport_write accepted] ||
+        ![string is true -strict [_read ::de1(wrote)]]} {return 0}
+    set previous [_read ::de1(previouscmd)]
+    return [expr {[llength $previous] == 4 && [namespace tail [lindex $previous 0]] eq "de1_comm" &&
+        [lrange $previous 1 2] eq {write RequestedState} &&
+        [lindex $previous 3] eq [dict get $transport_write payload]}]
+}
+
+# Execution trace errors must never interrupt a native queue or BLE callback.
+proc ::aiden::core::_queue_trace {command operation} {
+    if {[catch {::aiden::core::_queue_observed $command}]} {_verification_count queue_trace_errors}
+}
+
+proc ::aiden::core::_queue_observed {command} {
+    variable pending_request
+    variable request_context
+    if {$request_context eq {} || $pending_request eq {} ||
+        [dict get $pending_request action] ne "stop" ||
+        [dict get $pending_request id] ne $request_context} {return}
+    set cmd [lindex $command 2]
+    if {[namespace tail [lindex $cmd 0]] eq "de1_comm" &&
+        [lrange $cmd 1 2] eq {write RequestedState} && [_idle_payload [lindex $cmd 3]]} {
+        dict set pending_request stop_enqueued 1
+    }
+}
+
+proc ::aiden::core::_comm_trace {command args} {
+    if {[catch {::aiden::core::_comm_observed $command {*}$args}]} {_verification_count dispatch_trace_errors}
+}
+
+proc ::aiden::core::_comm_observed {command args} {
+    variable transport_sequence
+    variable transport_write
+    variable transport_read
+    variable transport_read_context
+    variable transport_calls
+    set operation [lindex $args end]
+    if {$operation eq "enter"} {
+        set ticket {}
+        if {[lrange $command 1 2] eq {write RequestedState}} {
+            incr transport_sequence
+            set ticket $transport_sequence
+            set transport_write [dict create ticket $ticket payload [lindex $command 3] \
+                handle [_read ::de1(device_handle)] accepted 0 acknowledged 0]
+        } elseif {[lrange $command 1 2] eq {read StateInfo} && $transport_read_context eq {}} {
+            # A different read cannot be mistaken for the explicit Stop fence.
+            set transport_read {}
+        }
+        lappend transport_calls $ticket
+    } elseif {$operation eq "leave" && [llength $transport_calls]} {
+        set ticket [lindex $transport_calls end]
+        set transport_calls [lrange $transport_calls 0 end-1]
+        if {$ticket ne {} && $transport_write ne {} && [dict get $transport_write ticket] eq $ticket} {
+            dict set transport_write accepted [expr {[lindex $args 0] == 0 && [lindex $args 1] eq "1"}]
+        }
+    }
+}
+
+proc ::aiden::core::_ble_trace {command args} {
+    if {[catch {::aiden::core::_ble_observed $command {*}$args}]} {_verification_count callback_trace_errors}
+}
+
+proc ::aiden::core::_ble_observed {command args} {
+    variable ble_calls
+    variable transport_write
+    variable transport_read
+    variable verification_counts
+    set operation [lindex $args end]
+    if {$operation eq "enter"} {
+        set read {}
+        set data [lindex $command 2]
+        if {[lindex $command 1] eq "characteristic" && ![catch {dict size $data}]} {
+            set valid 1
+            foreach key {handle state suuid cuuid access value} {
+                if {![dict exists $data $key]} {set valid 0}
+            }
+            if {$valid && [dict get $data state] eq "connected" &&
+                [dict get $data handle] eq [_read ::de1(device_handle)] &&
+                [_read ::de1(suuid)] ne {} &&
+                [dict get $data suuid] eq [_read ::de1(suuid)] &&
+                [dict get [_connection device_handle] connected]} {
+                set access [dict get $data access]
+                set cuuid [dict get $data cuuid]
+                if {$access eq "w" && [_read ::de1(cuuid_02)] ne {} && $cuuid eq [_read ::de1(cuuid_02)]} {
+                    _verification_count requested_state_ack_seen
+                    dict set verification_counts ack_value_length [string length [dict get $data value]]
+                    dict set verification_counts ack_payload_matches [expr {$transport_write ne {} &&
+                        [dict get $transport_write payload] eq [dict get $data value]}]
+                    dict set verification_counts ack_serial_matches [_write_is_inflight]
+                }
+                if {$access eq "w" && [_read ::de1(cuuid_02)] ne {} &&
+                    $cuuid eq [_read ::de1(cuuid_02)] && $transport_write ne {} &&
+                    [dict get $transport_write accepted] &&
+                    [dict get $transport_write handle] eq [dict get $data handle] &&
+                    [dict get $transport_write payload] eq [dict get $data value]} {
+                    # Observe before native run_next_userdata_cmd dispatches the
+                    # next queue entry, otherwise the write identity is lost.
+                    dict set transport_write acknowledged 1
+                } elseif {$access eq "r" && [_read ::de1(cuuid_0E)] ne {} &&
+                    $cuuid eq [_read ::de1(cuuid_0E)] && $transport_read ne {}} {
+                    set read [dict merge $transport_read [dict create value [dict get $data value]]]
+                    set transport_read {}
+                    _verification_count read_received
+                }
+            }
+        }
+        lappend ble_calls $read
+    } elseif {$operation eq "leave" && [llength $ble_calls]} {
+        set read [lindex $ble_calls end]
+        set ble_calls [lrange $ble_calls 0 end-1]
+        if {$read ne {} && [lindex $args 0] == 0} {_reconcile_idle_read $read}
+    }
+}
+
+proc ::aiden::core::_read_after_stop {id epoch} {
+    variable pending_request
+    variable connection_epoch
+    variable transport_write
+    variable transport_read
+    variable transport_read_context
+    set transport_read {}
+    if {$pending_request ne {} && [dict get $pending_request id] eq $id &&
+        [dict get $pending_request action] eq "stop" && $epoch == $connection_epoch &&
+        [dict exists $pending_request stop_enqueued] && [dict get $pending_request stop_enqueued] &&
+        $transport_write ne {} && [dict get $transport_write acknowledged] &&
+        [_idle_payload [dict get $transport_write payload]]} {
+        set transport_read [dict create id $id epoch $epoch write_ticket [dict get $transport_write ticket]]
+        _verification_count fence_armed
+    }
+    # This one read was queued only by an explicit Stop. It follows the native
+    # Idle write in the existing serial queue and adds no timer or physical start.
+    set transport_read_context $id
+    set code [catch {::de1_comm read StateInfo} result options]
+    set transport_read_context {}
+    if {$code || $result ne "1"} {set transport_read {}}
+    if {$code} {return -options $options $result}
+    return $result
+}
+
+proc ::aiden::core::_reconcile_idle_read {read} {
+    variable pending_request
+    variable observed_operation
+    variable connection_epoch
+    variable transport_write
+    variable request_reconciliation
+    variable last_state_event
+    variable event_sequence
+    if {$pending_request eq {} || [dict get $pending_request id] ne [dict get $read id] ||
+        [dict get $pending_request action] ne "stop" || [dict get $read epoch] != $connection_epoch ||
+        ![dict get [_connection device_handle] connected] || $transport_write eq {} ||
+        [dict get $transport_write ticket] ne [dict get $read write_ticket] ||
+        ![dict get $transport_write acknowledged] || [_native_state] ne "Idle" || [_finalizing]} {return}
+    if {$observed_operation ne {} && [dict get $observed_operation flow_confirmed] &&
+        ![dict get $observed_operation flow_ended]} {return}
+    set value [dict get $read value]
+    if {[string length $value] != 2} {return}
+    binary scan $value cc state substate
+    if {($state & 255) != [_read ::de1(state)] || ($substate & 255) != [_read ::de1(substate)] ||
+        [_native_substate] eq "unknown" || [string match Error_* [_native_substate]]} {return}
+    foreach entry [_read ::de1(cmdstack)] {
+        set cmd [lindex $entry 1]
+        if {[namespace tail [lindex $cmd 0]] eq "de1_comm" && [lrange $cmd 1 2] eq {write RequestedState}} {return}
+    }
+    set now [expr {[clock milliseconds] / 1000.0}]
+    set request_reconciliation [dict create id [dict get $pending_request id] action stop \
+        new_operation [dict get $pending_request new_operation] source native_stop_ack_and_idle_read event_time $now]
+    set pending_request {}
+    set last_state_event [dict create this_state Idle this_substate [_native_substate] \
+        previous_state Idle previous_substate [_native_substate] event_time $now source native_state_read]
+    incr event_sequence
+    _verification_count proof_confirmed
 }
 
 proc ::aiden::core::command {action args} {
     variable pending_request
+    variable request_sequence
+    variable request_context
+    variable request_reconciliation
     set s [snapshot]
     set mode {}
     if {$action eq "start"} {
@@ -572,7 +877,10 @@ proc ::aiden::core::command {action args} {
     if {$track} {
         set new_operation [expr {$action eq "start" || ($pending_request ne {} && \
             [dict exists $pending_request new_operation] && [dict get $pending_request new_operation])}]
-        set pending_request [dict create action $action mode $mode api $api status requested new_operation $new_operation]
+        incr request_sequence
+        set pending_request [dict create id $request_sequence action $action mode $mode api $api status requested \
+            request_time [expr {[clock milliseconds] / 1000.0}] new_operation $new_operation]
+        set request_reconciliation {}
     }
     if {$action eq "stop"} {
         variable observed_operation
@@ -580,10 +888,28 @@ proc ::aiden::core::command {action args} {
             dict set observed_operation manual_stop_requested 1
         }
     }
-    if {[catch {uplevel #0 [list $api]} result options]} {
+    if {$track} {set request_context $request_sequence}
+    set code [catch {uplevel #0 [list $api]} result options]
+    set request_context {}
+    if {$code} {
         # A thrown request may already have reached a transport. Keep pending.
         if {$track} {dict set pending_request status uncertain}
         return -options $options $result
+    }
+    variable hook_flags
+    if {$action eq "stop" && [dict get $s native_state] eq "Idle" && ![dict get $s flow_confirmed] &&
+        $pending_request ne {} && [dict get $pending_request id] == $request_sequence &&
+        [dict exists $pending_request stop_enqueued] && [dict get $pending_request stop_enqueued] &&
+        [dict exists $hook_flags ::de1_ble_handler] && [dict exists $hook_flags ::de1_comm]} {
+        variable connection_epoch
+        # A fence read is an observation in the same queue, not a second Stop.
+        # Queue failure preserves pending uncertainty instead of acknowledging.
+        if {[catch {::userdata_append {Aiden Stop state verification} \
+            [list ::aiden::core::_read_after_stop $request_sequence $connection_epoch] 1}]} {
+            if {$pending_request ne {}} {dict set pending_request status uncertain}
+        } else {
+            _verification_count fence_queued
+        }
     }
     return [dict create action $action mode $mode api $api status requested confirmed 0 native_return $result \
         requires_group_head [expr {$action eq "start" && [dict get $s start_requires_group_head]}]]
@@ -607,6 +933,9 @@ proc ::aiden::core::native_page_exists {page} {
 
 proc ::aiden::core::route {target} {
     set s [snapshot]
+    if {[dict get $s pending] eq "stop"} {
+        error {Waiting for machine confirmation of Stop; navigation is locked}
+    }
     set sleeping [expr {[dict get $s connected] && [dict get $s native_state] eq "Sleep" && \
         [dict get $s pending] eq {} && ![dict get $s native_finalization_pending]}]
     set offline_setup [expr {$target in {scale app history original native_home} && ![dict get $s connected] && \

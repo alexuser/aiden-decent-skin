@@ -77,6 +77,16 @@ proc ::aiden::app::state_change {state} {
     set previous [::dui page current]
     # Always retain Decent/DSx2's existing state processing and safety screens.
     ::aiden::app::native_state_change $state
+    if {!$native_view && [string match ghc_* $previous] && $state eq "Idle" &&
+            [get [::aiden::core::snapshot] pending] eq "start"} {
+        # A tablet request can remain Idle until the physical GHC is pressed.
+        # Preserve its instructions, but never replace a native warning page.
+        set current [::dui page current]
+        if {$current eq "off" || [string match ghc_* $current]} {
+            ::page_show $previous
+        }
+        return
+    }
     if {!$native_view && ([string match aiden_* $previous] || [string match ghc_* $previous]) && \
         $state in {Idle Espresso Steam HotWater HotWaterRinse Sleep GoingToSleep}} {
         if {$state ne "Idle"} {catch {::aiden::recipe::cancel}}
@@ -155,7 +165,7 @@ proc ::aiden::app::tick {} {
         set last_snapshot [sample]
         ::aiden::ui::render $last_snapshot
         set status {}
-        foreach key {native_state native_substate connected pending phase mode primary_action primary_enabled current_page context_verified} {
+        foreach key {native_state native_substate connected pending phase mode primary_action primary_enabled current_page context_verified stop_verification} {
             dict set status $key [get $last_snapshot $key]
         }
         if {[info exists ::de1(device_handle)]} {

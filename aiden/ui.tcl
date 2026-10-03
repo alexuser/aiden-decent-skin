@@ -13,6 +13,7 @@ namespace eval ::aiden::ui {
     variable selected_id {}
     variable query {}
     variable favorites_only 0
+    variable search_focused 0
     variable recipe_draft {}
     variable recipe_syncing 0
     variable recipe_dirty {}
@@ -292,9 +293,10 @@ proc ::aiden::ui::mount_home {} {
     icon $page aiden_recipe_icon 1734 545 graph-options 40 soft aiden_ready
     hit $page aiden_recipe_hit 72 493 1710 105 [list ::aiden::ui::dispatch recipe] aiden_ready
     icon $page aiden_scale_icon 1944 455 scale 56 soft aiden_scale_ready
-    label $page aiden_scale_weight 2008 393 idle_weight 51 text 330 bold aiden_scale_ready
-    hit $page aiden_scale_hit 1857 371 425 170 [list ::aiden::ui::dispatch scale] aiden_scale_ready
-    icon_button $page aiden_tare 2302 372 168 tare [list ::aiden::ui::dispatch tare] aiden_scale_ready
+    label $page aiden_scale_weight 2008 393 idle_weight 51 text 462 bold aiden_scale_ready
+    hit $page aiden_scale_hit 1857 371 613 170 [list ::aiden::ui::dispatch scale] aiden_scale_ready
+    # Keep the full weight line separate from the tare control and its hit area.
+    icon_button $page aiden_tare 2302 570 168 tare [list ::aiden::ui::dispatch tare] aiden_scale_ready
     label $page aiden_readiness_title 1950 385 readiness_title 33 soft 450 bold aiden_readiness
     label $page aiden_readiness_detail 1950 468 readiness_detail 21 muted 450 regular aiden_readiness
     hit $page aiden_readiness_hit 1890 346 588 225 [list ::aiden::ui::dispatch status] aiden_readiness
@@ -442,16 +444,18 @@ proc ::aiden::ui::mount_profiles {} {
         -textvariable ::aiden::ui::query -trim 0 -editor_page 0 -background $palette(inset) -foreground $palette(text) \
         -insertbackground $palette(mint) -relief flat -borderwidth 0 -highlightthickness 0]
     bind $widgets(search) <Escape> {::aiden::ui::cancel aiden_profiles; break}
+    bind $widgets(search) <FocusIn> {::aiden::ui::search_layout 1}
+    bind $widgets(search) <FocusOut> {::aiden::ui::search_layout 0}
     icon $page aiden_search_icon 1351 435 search 40 soft
     button $page aiden_profiles_all 380 507 510 88 All [list ::aiden::ui::filter_favorites 0]
     button $page aiden_profiles_favorites 897 507 498 88 Favorites [list ::aiden::ui::filter_favorites 1]
     label $page aiden_profiles_count 384 608 chooser_count 16 muted 950
-    set widgets(profiles) [dui add text $page 380 656 -tags aiden_profile_list -canvas_width 996 -canvas_height 655 -font [font 26 bold] \
+    set widgets(profiles) [dui add text $page 380 646 -tags aiden_profile_list -canvas_width 996 -canvas_height 665 -font [font 23 bold] \
         -wrap word -background $palette(panel) -foreground $palette(soft) -relief flat -borderwidth 0 -highlightthickness 0 \
-        -padx 18 -pady 8 -spacing1 14 -spacing3 14 -cursor arrow -takefocus 1 -exportselection 0 \
+        -padx 0 -pady 8 -spacing1 8 -spacing3 8 -cursor arrow -takefocus 1 -exportselection 0 \
         -yscrollbar 1 -yscrollbar_width 18 -yscrollbar_sliderlength 94 -yscrollbar_background $palette(panel) -yscrollbar_troughcolor $palette(inset)]
     set w $widgets(profiles)
-    $w tag configure metadata -font [font 19] -foreground $palette(muted) -spacing1 4 -spacing3 25
+    $w tag configure metadata -font [font 16] -foreground $palette(muted) -spacing1 0 -spacing3 12
     bind $w <ButtonPress-1> {::aiden::ui::touch_begin %x %y; break}
     bind $w <B1-Motion> {::aiden::ui::touch_move %x %y; break}
     bind $w <ButtonRelease-1> {::aiden::ui::touch_end %x %y; break}
@@ -463,11 +467,11 @@ proc ::aiden::ui::mount_profiles {} {
     bind $w <Return> {break}
     bind $w <KeyPress> {break}
     $w configure -state disabled
-    panel $page aiden_preview_panel 1452 385 2417 1285 inset 29
-    label $page aiden_preview_type 1496 433 preview_type 19 muted 755
-    label $page aiden_preview_title 1496 486 preview_title 34 text 786 bold
-    icon_button $page aiden_preview_favorite 2292 413 80 bookmark-simple [list ::aiden::ui::favorite_selected]
-    set widgets(preview_description) [dui add text $page 1496 666 -tags aiden_preview_description -canvas_width 862 -canvas_height 158 \
+    panel $page aiden_preview_panel 1452 385 2417 1285 inset 29 aiden_profile_preview
+    label $page aiden_preview_type 1496 433 preview_type 19 muted 755 regular aiden_profile_preview
+    label $page aiden_preview_title 1496 486 preview_title 34 text 786 bold aiden_profile_preview
+    icon_button $page aiden_preview_favorite 2292 413 80 bookmark-simple [list ::aiden::ui::favorite_selected] aiden_profile_preview
+    set widgets(preview_description) [dui add text $page 1496 616 -tags {aiden_preview_description aiden_profile_preview} -canvas_width 862 -canvas_height 208 \
         -font [font 19] -wrap word -background $palette(inset) -foreground $palette(soft) -relief flat -borderwidth 0 \
         -highlightthickness 0 -padx 0 -pady 0 -cursor arrow -takefocus 1 -exportselection 0]
     bind $widgets(preview_description) <ButtonPress-1> {%W scan mark %x %y; break}
@@ -475,13 +479,16 @@ proc ::aiden::ui::mount_profiles {} {
     bind $widgets(preview_description) <MouseWheel> {%W yview scroll [expr {-(%D / 120)}] units; break}
     bind $widgets(preview_description) <KeyPress> {break}
     $widgets(preview_description) configure -state disabled
-    label $page aiden_preview_metrics 1496 856 preview_metrics 25 soft 865 bold
-    label $page aiden_preview_graph_caption 1496 930 preview_graph_caption 14 muted 850
-    mount_plot_pair $page preview 1495 970 860 110 41 aiden_preview_signals
-    label $page aiden_preview_notice 1496 1263 preview_notice 15 soft 851
+    label $page aiden_preview_metrics 1496 856 preview_metrics 25 soft 865 bold aiden_profile_preview
+    label $page aiden_preview_graph_caption 1496 930 preview_graph_caption 14 muted 850 regular aiden_profile_preview
+    mount_plot_pair $page preview 1495 970 860 110 41 {aiden_preview_signals aiden_profile_preview}
+    label $page aiden_preview_notice 1496 1235 preview_notice 15 soft 851 regular aiden_profile_preview
     button $page aiden_profiles_cancel 1934 1379 210 86 Cancel [list ::aiden::ui::cancel $page]
     button $page aiden_profiles_use 2168 1379 250 86 {Use profile} [list ::aiden::ui::commit_profile] 1
     button $page aiden_profiles_clear 380 1379 194 86 Clear [list ::aiden::ui::clear_search]
+    button $page aiden_search_clear 1452 391 194 86 Clear [list ::aiden::ui::clear_search] 0 aiden_search_actions
+    button $page aiden_search_done 1750 391 668 86 Done [list ::aiden::ui::finish_search] 0 aiden_search_actions
+    visibility $page aiden_search_actions 0
 }
 
 proc ::aiden::ui::mount_modes {} {
@@ -490,11 +497,11 @@ proc ::aiden::ui::mount_modes {} {
     label $page aiden_modes_name 1035 592 modes_title 38 text 1290 bold
     label $page aiden_modes_detail 1035 677 modes_detail 18 muted 1290
     for {set i 0} {$i < 4} {incr i} {
-        set y [expr {795+$i*77}]
+        set y [expr {760+$i*82}]
         label $page aiden_mode_field_${i}_name 1035 $y mode_field_${i}_name 23 soft 575 regular aiden_mode_field_$i
         label $page aiden_mode_field_${i}_value 1670 $y mode_field_${i}_value 26 text 505 bold aiden_mode_field_$i
-        button $page aiden_mode_field_${i}_minus 2170 [expr {$y-9}] 96 77 − [list ::aiden::ui::step_mode $i -1] 0 aiden_mode_field_$i
-        button $page aiden_mode_field_${i}_plus 2290 [expr {$y-9}] 96 77 + [list ::aiden::ui::step_mode $i 1] 0 aiden_mode_field_$i
+        button $page aiden_mode_field_${i}_minus 2170 [expr {$y-9}] 96 64 − [list ::aiden::ui::step_mode $i -1] 0 aiden_mode_field_$i
+        button $page aiden_mode_field_${i}_plus 2290 [expr {$y-9}] 96 64 + [list ::aiden::ui::step_mode $i 1] 0 aiden_mode_field_$i
     }
     label $page aiden_modes_hint 1035 1098 modes_hint 16 muted 1330
     button $page aiden_modes_cancel 1035 1186 223 86 Cancel [list ::aiden::ui::cancel $page]
@@ -584,11 +591,14 @@ proc ::aiden::ui::refresh {} {
     variable current_page
     variable dynamic
     variable data
+    variable rendered_text
     if {!$mounted} {return}
     foreach item [array names dynamic "$current_page,*"] {
         lassign [split $item ,] page tag
         set key $dynamic($item)
+        if {[info exists rendered_text($item)] && $rendered_text($item) eq $data($key)} {continue}
         dui item config $page $tag -text $data($key)
+        set rendered_text($item) $data($key)
     }
 }
 
@@ -718,12 +728,18 @@ proc ::aiden::ui::render {snapshotDict} {
     }
     if {$mounted} {
         if {([active] || [boolean $snapshot busy]) && $current_page ne {aiden_home} && [string match aiden_* [dui page current]]} {show aiden_home}
-        render_home_layout
+        if {$current_page in {aiden_home aiden_graph}} {render_home_layout}
         set graph [get $snapshot graph {}]
         if {$result ne {} && ![active]} {
             set graph [first $result {graph_samples graph samples} $graph]
         }
-        set_graph $graph
+        if {$current_page in {aiden_home aiden_graph}} {set_graph $graph}
+        if {$current_page ni {aiden_home aiden_graph}} {
+            set tone warning
+            if {[boolean $snapshot ready]} {set tone mint}
+            if {[get $snapshot readiness {}] in {offline disconnected unknown sleeping sleep}} {set tone muted}
+            foreach page $::aiden::ui::pages {dui item config $page ${page}_dot -fill $::aiden::ui::palette($tone)}
+        }
         enabled aiden_scale aiden_scale_tare [boolean $scale can_tare [boolean $snapshot can_tare]]
         enabled aiden_status aiden_status_wake [boolean $snapshot can_wake]
         enabled aiden_status aiden_status_sleep [boolean $snapshot can_sleep]
@@ -866,7 +882,7 @@ proc ::aiden::ui::cancel {page} {
     variable editing_mode
     switch -- $page {
         aiden_recipe {dispatch recipe_cancel}
-        aiden_profiles {dispatch profile_cancel}
+        aiden_profiles {finish_search; dispatch profile_cancel}
         aiden_modes {dispatch mode_cancel $editing_mode}
         aiden_workflow {dispatch workflow_cancel}
         default {dispatch close}
@@ -1055,6 +1071,34 @@ proc ::aiden::ui::filter_favorites {value} {
     render_catalog
 }
 
+proc ::aiden::ui::finish_search {} {
+    variable widgets
+    if {[info commands ::hide_android_keyboard] ne {}} {::hide_android_keyboard}
+    focus [dui canvas]
+    search_layout 0
+}
+
+proc ::aiden::ui::search_layout {focused} {
+    variable search_focused
+    variable mounted
+    variable current_page
+    if {!$mounted || $current_page ne "aiden_profiles"} {return}
+    set search_focused $focused
+    visibility aiden_profiles aiden_profile_preview [expr {!$focused}]
+    visibility aiden_profiles aiden_search_actions $focused
+    foreach id [dui item get aiden_profiles aiden_profile_list] {
+        [dui canvas] itemconfigure $id -height [dui::platform::rescale_y [expr {$focused ? 210 : 665}]]
+    }
+    # The description/graphs restore only if the selected record supports them.
+    if {!$focused} {
+        if {[info commands ::hide_android_keyboard] ne {}} {::hide_android_keyboard}
+        set record [selected_record]
+        set graph [get $record graph {}]
+        if {$graph eq {}} {set graph [profile_graph $record]}
+        visibility aiden_profiles aiden_preview_signals [expr {$graph ne {}}]
+    }
+}
+
 proc ::aiden::ui::render_catalog {} {
     variable mounted
     variable catalog
@@ -1072,6 +1116,9 @@ proc ::aiden::ui::render_catalog {} {
         if {$query ne {} && [string first [string tolower $query] [string tolower "$title [get $record description]"]] < 0} {continue}
         lappend filtered $record
     }
+    set selection_visible 0
+    foreach record $filtered {if {[get $record id] eq $selected_id} {set selection_visible 1; break}}
+    if {!$selection_visible} {set selected_id {}}
     set data(chooser_count) "[llength $filtered] profiles · Drag to scroll"
     if {!$mounted || ![info exists widgets(profiles)]} {return}
     set w $widgets(profiles)
@@ -1085,15 +1132,15 @@ proc ::aiden::ui::render_catalog {} {
         set identity [get $record id]
         set marker {}
         if {[boolean $record current]} {append marker {  · Current}}
-        if {$identity eq $selected_id} {append marker {  · Preview}}
-        $w insert end "$title$marker\n" $tag
+        $w insert end "$title\n" $tag
         set metadata "[get $record type Profile] · [compact [get $record dose]] g → [compact [get $record yield]] g"
+        if {$marker ne {}} {append metadata $marker}
         if {![boolean $record available 1] || ![boolean $record applyable 1]} {set metadata [first $record {error reason} {Unavailable profile}]}
         $w insert end "$metadata\n" [list $tag metadata]
         set fill $palette(panel)
         set text $palette(soft)
         if {$identity eq $selected_id} {set fill $palette(selected); set text $palette(mint)}
-        $w tag configure $tag -lmargin1 14 -lmargin2 14 -rmargin 26 -background $fill -foreground $text
+        $w tag configure $tag -lmargin1 12 -lmargin2 12 -rmargin 20 -background $fill -foreground $text
         incr row
     }
     if {$row == 0} {$w insert end {No profiles match. Try a shorter name or All.}}
@@ -1121,10 +1168,10 @@ proc ::aiden::ui::render_catalog {} {
         }
         set graph [get $record graph {}]
         if {$graph eq {}} {set graph [profile_graph $record]}
-        if {$graph ne {}} {set_graph $graph preview}
     }
     set graph [get $record graph {}]
     if {$graph eq {}} {set graph [profile_graph $record]}
+    if {$graph ne {}} {set_graph $graph preview}
     visibility aiden_profiles aiden_preview_signals [expr {$graph ne {}}]
     set description $widgets(preview_description)
     $description configure -state normal
@@ -1132,9 +1179,10 @@ proc ::aiden::ui::render_catalog {} {
     $description insert end $data(preview_description)
     $description configure -state disabled
     $description yview moveto 0
-    dui item config aiden_profiles aiden_preview_title -font [fit_font $data(preview_title) 786 170 34 18]
+    dui item config aiden_profiles aiden_preview_title -font [fit_font $data(preview_title) 786 120 34 18]
     style_widgets aiden_profiles
     enabled aiden_profiles aiden_profiles_use [expr {$record ne {} && [boolean $record available 1] && [boolean $record applyable 1] && [commit_allowed]}]
+    search_layout $::aiden::ui::search_focused
     refresh
 }
 
@@ -1195,6 +1243,7 @@ proc ::aiden::ui::move_profile {direction} {
 
 proc ::aiden::ui::commit_profile {} {
     variable selected_id
+    if {$selected_id eq {} || [selected_record] eq {}} {return}
     dispatch profile_apply $selected_id
 }
 
@@ -1242,7 +1291,10 @@ proc ::aiden::ui::render_mode_fields {} {
         if {[string is double -strict $value] && $scale!=1} {set value [expr {$value*double($scale)}]}
         if {[get $field display_value {}] ne {} && ![dict exists $mode_draft $key]} {set value [get $field display_value]}
         set data(mode_field_${i}_name) [get $field label $key]
-        set data(mode_field_${i}_value) "[compact $value] [first $field {display_unit unit units} {}]"
+        set unit [first $field {display_unit unit} {}]
+        if {$unit eq {} && [llength [get $field units {}]] == 1} {set unit [lindex [get $field units] 0]}
+        set data(mode_field_${i}_value) [string trim "[compact $value] $unit"]
+        if {$key eq "water_volume" && $unit eq {}} {set data(mode_field_${i}_value) {Unavailable}}
         if {[get $field kind {}] eq {boolean} || [get $field semantics {}] in {boolean bool} || [get $field units {}] eq {boolean}} {set data(mode_field_${i}_value) [expr {[string is true -strict $value] ? {On} : {Off}}]}
         set available [boolean $field available]
         enabled aiden_modes [list aiden_mode_field_${i}_minus aiden_mode_field_${i}_plus] $available
@@ -1501,7 +1553,15 @@ proc ::aiden::ui::fit_font {value width height preferred minimum} {
         set line {}
         foreach word [split $value] {
             set trial [string trim "$line $word"]
-            if {[::font measure $chosen $trial]>$width && $line ne {}} {incr lines; set line $word} else {set line $trial}
+            if {[::font measure $chosen $trial]>$width && $line ne {}} {incr lines; set line {}}
+            if {[::font measure $chosen $word]>$width} {
+                # Tk wraps an unbroken filename by character, too. Account for
+                # those lines instead of treating an over-wide word as one line.
+                foreach ch [split $word {}] {
+                    if {$line ne {} && [::font measure $chosen "$line$ch"]>$width} {incr lines; set line {}}
+                    append line $ch
+                }
+            } else {set line [string trim "$line $word"]}
         }
         if {$lines*[::font metrics $chosen -linespace]<=$height} {break}
     }

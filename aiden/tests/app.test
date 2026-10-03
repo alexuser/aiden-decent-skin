@@ -41,6 +41,7 @@ namespace eval ::aiden::ui {
 }
 proc homedir {} {return /tmp}
 proc dui {args} {return $::fixture::screen}
+proc page_show {page} {set ::fixture::screen $page}
 proc skins_page_change_due_to_de1_state_change {state} {lappend ::fixture::calls [list native_state $state]}
 proc reset_fixture {{state idle}} {
     set ::fixture::calls {}
@@ -62,6 +63,35 @@ test boot-no-actuation-1 {Boot only mounts and observes; never wakes or starts} 
     ::aiden::app::boot
     list $::fixture::calls [dict get $::fixture::rendered primary_action]
 } -result {{observers mount} wake}
+test ghc-pending-start-1 {Idle preserves the physical-start instruction page} -body {
+    reset_fixture
+    set ::fixture::screen ghc_espresso
+    dict set ::fixture::state pending start
+    ::aiden::app::state_change Idle
+    list $::fixture::screen $::fixture::calls
+} -result {ghc_espresso {{native_state Idle}}}
+test ghc-operation-started-1 {Actual dispensing returns to the Aiden operating screen} -body {
+    reset_fixture
+    set ::fixture::screen ghc_espresso
+    ::aiden::app::state_change Espresso
+    list $::fixture::screen $::fixture::calls
+} -result {aiden_home {{native_state Espresso} cancel}}
+test ghc-native-destination-1 {Restore instructions from off, but preserve native warnings} -body {
+    rename ::aiden::app::native_state_change ::fixture::saved_native_state_change
+    proc ::aiden::app::native_state_change {state} {set ::fixture::screen $::fixture::destination}
+    set screens {}
+    foreach destination {off machine_warning} {
+        reset_fixture
+        set ::fixture::destination $destination
+        set ::fixture::screen ghc_espresso
+        dict set ::fixture::state pending start
+        ::aiden::app::state_change Idle
+        lappend screens $::fixture::screen
+    }
+    rename ::aiden::app::native_state_change {}
+    rename ::fixture::saved_native_state_change ::aiden::app::native_state_change
+    set screens
+} -result {ghc_espresso machine_warning}
 test navigation-1 {Changing modes only prepares one} -body {
     reset_fixture
     ::aiden::app::action mode steam
@@ -89,6 +119,31 @@ test safe-route-1 {Original UI route enables native presentation} -body {
     ::aiden::app::action original_skin
     list $::fixture::calls $::aiden::app::native_view
 } -result {{{route original}} 1}
+test pending-stop-repeat-1 {Repeated Stop taps do not replay a pending physical command} -body {
+    reset_fixture
+    ::aiden::app::action primary
+    dict set ::fixture::state pending start
+    ::aiden::app::action stop
+    dict set ::fixture::state pending stop
+    ::aiden::app::action stop
+    ::aiden::app::action primary
+    list $::fixture::calls [dict get $::fixture::rendered phase] \
+        [dict get $::fixture::rendered primary_enabled]
+} -result {{{command start espresso} {command stop}} stop-requested 0}
+test pending-stop-navigation-1 {Rejected native navigation preserves pending Stop and presentation ownership} -body {
+    reset_fixture
+    ::aiden::app::action primary
+    dict set ::fixture::state pending start
+    ::aiden::app::action stop
+    dict set ::fixture::state pending stop
+    rename ::aiden::core::route ::fixture::saved_route
+    proc ::aiden::core::route {target} {error {Waiting for machine confirmation of Stop; navigation is locked}}
+    ::aiden::app::action history
+    rename ::aiden::core::route {}
+    rename ::fixture::saved_route ::aiden::core::route
+    list $::fixture::calls $::aiden::app::native_view $::fixture::screen \
+        [dict get $::fixture::rendered phase] $::aiden::app::notice
+} -result {{{command start espresso} {command stop}} 0 aiden_home stop-requested {Waiting for machine confirmation of Stop; navigation is locked}}
 test preserve-alert-1 {Native safety state remains native} -body {
     reset_fixture
     ::aiden::app::state_change Refill
