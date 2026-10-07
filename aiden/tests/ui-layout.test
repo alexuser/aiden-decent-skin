@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Declared geometry and real UI callback regressions; no Tk or hardware.
+package require tcltest 2
+namespace import ::tcltest::*
+set root [file normalize [file join [file dirname [info script]] ..]]
+
+# Reuse the supported headless adapter, stopping before its app/test bodies.
+set fd [open [file join $root ui-fixture.tcl] r]
+set source [read $fd]
+close $fd
+set marker [string first {namespace eval ::aiden::app {}} $source]
+if {$marker < 0} {error {Headless fixture adapter boundary changed}}
+eval [string range $source 0 [expr {$marker-1}]]
+namespace eval ::layout {
+    variable width 1920
+    variable height 1200
+    variable coords {}
+    variable declared {}
+}
+rename ::dui ::layout::adapter
+proc ::dui {section args} {
+    if {$section eq {cget}} {
+        if {[lindex $args 0] eq {screen_size_width}} {return $::layout::width}
+        if {[lindex $args 0] eq {screen_size_height}} {return $::layout::height}
+    }
+    set result [::layout::adapter $section {*}$args]
+    if {$section eq {add}} {
+        set type [lindex $args 0]
+        set start 2
+        set page [lindex $args 1]
+        if {$type eq {shape}} {set start 3; set page [lindex $args 2]}
+        set pos [lsearch -exact $args -tags]
+        set tag [lindex [lindex $args [expr {$pos+1}]] 0]
+        set coords [lrange $args $start [expr {$start+1}]]
+        if {$type eq {shape}} {set coords [lrange $args $start [expr {$start+3}]]}
+        if {$type eq {dbutton}} {
+            set wi [lsearch -exact $args -bwidth]
+            set hi [lsearch -exact $args -bheight]
+            lappend coords [expr {[lindex $coords 0]+[lindex $args [expr {$wi+1}]]}] \
+                [expr {[lindex $coords 1]+[lindex $args [expr {$hi+1}]]}]
+        }
+        dict set ::layout::declared "$page,$tag" $coords
+    }
+    return $result
+}
+proc ::dui::platform::rescale_x {x} {return [expr {$x*$::layout::width/2560.0}]}
+proc ::dui::platform::rescale_y {y} {return [expr {$y*$::layout::height/1600.0}]}
+proc ::.can {args} {
+    if {[lindex $args 0] eq {coords}} {
+        set id [lindex $args 1]
+        if {[llength $args] > 2} {dict set ::layout::coords $id [lrange $args 2 end]}
+        if {[dict exists $::layout::coords $id]} {return [dict get $::layout::coords $id]}
+        return {0 0}
+    }
+    return {}
+}
+namespace eval ::aiden::app {}
+proc ::aiden::app::action {name args} {
+    lappend ::fixture::actions [list $name {*}$args]
+    return 1
+}
+source [file join $root ui.tcl]
+source [file join $root recipe.tcl]
+::aiden::ui::mount
+::aiden::ui::set_reduced_motion 1
+
+proc ::layout::rect {page tag} {
+    set id [dict get $::fixture::items "$page,$tag"]
+    if {[dict exists $::layout::coords $id]} {return [dict get $::layout::coords $id]}
+    set out {}; set i 0
+    foreach value [dict get $::layout::declared "$page,$tag"] {
+        if {$i%2} {lappend out [::dui::platform::rescale_y $value]} else {lappend out [::dui::platform::rescale_x $value]}
+        incr i
+    }
+    return $out
+}
+proc ::layout::contains {rect x y} {
+    lassign $rect x0 y0 x1 y1
+    return [expr {$x>$x0 && $x<$x1 && $y>$y0 && $y<$y1}]
+}
+proc ::layout::targets {page x y} {
+    set out {}
+    dict for {key command} $::fixture::commands {
+        lassign [split $key ,] p tag
+        if {$p eq $page && [::fixture::state $p $tag] eq {normal} && [contains [rect $p $tag] $x $y]} {lappend out $tag}
+    }
+    return $out
+}
+proc ::layout::tap {page tag x y} {
+    set targets [targets $page $x $y]
+    if {$targets ne [list $tag]} {error "Ambiguous declared hit: $page/$tag -> $targets"}
+    if {![::fixture::tap $page $tag]} {error "Undeliverable declared hit: $page/$tag"}
+}
+proc ::layout::intersects {a b} {
+    lassign $a ax ay ax1 ay1
+    lassign $b bx by bx1 by1
+    return [expr {min($ax1,$bx1)>max($ax,$bx) && min($ay1,$by1)>max($ay,$by)}]
+}
+proc ::layout::home {{title {Gentle and sweet}}} {
+    ::aiden::ui::show home
+    ::aiden::ui::render [dict create phase ready mode espresso status Ready ready 1 connected 1 \
+        primary_enabled 1 can_select_mode 1 can_tare 1 can_edit 1 weight 0 weight_quality live \
+        scale [dict create weight 0 quality live can_tare 1 state connected] \
+        recipe [dict create title $title dose 18 yield 36 temperature 93]]
+}
+
+foreach {width height} {1920 1200 1280 800} {
+    set ::layout::width $width
+    set ::layout::height $height
+    set ::layout::coords {}
+    set scale ${width}x${height}
+
+    test layout-$scale-1 {Short/long/short profile and recipe boundary routes stay separate} -body {
+        set ::fixture::actions {}
+        foreach title [list {Gentle and sweet} [string repeat LongUnbroken 14] {Gentle and sweet}] {
+            ::layout::home $title
+            set profile [::layout::rect aiden_home aiden_profile_hit]
+            set recipe [::layout::rect aiden_home aiden_recipe_hit]
+            if {[::layout::intersects $profile $recipe]} {error {Profile overlaps recipe}}
+            lassign $profile x y x1 y1
+            ::layout::tap aiden_home aiden_profile_hit [expr {($x+$x1)/2}] [expr {$y1-1}]
+            lassign $recipe rx ry rx1 ry1
+            ::layout::tap aiden_home aiden_recipe_hit [expr {($rx+$rx1)/2}] [expr {$ry+1}]
+            if {[::layout::targets aiden_home $x [expr {($y1+$ry)/2}]] ne {}} {error {Profile/recipe gap receives a command}}
+        }
+        set ::fixture::actions
+    } -result {profiles recipe profiles recipe profiles recipe}
+
+    test layout-$scale-2 {Every registered button target is at least 44 px and inside viewport} -body {
+        set small {}; set outside {}
+        dict for {key command} $::fixture::commands {
+            lassign [split $key ,] page tag
+            lassign [::layout::rect $page $tag] x y x1 y1
+            if {$x1-$x<44 || $y1-$y<44} {lappend small $key}
+            if {$x<0 || $y<0 || $x1>$::layout::width || $y1>$::layout::height} {lappend outside $key}
+        }
+        list $small $outside
+    } -result {{} {}}
+
+    test layout-$scale-3 {Small icon artwork stays centered inside the enlarged hit surface} -body {
+        set mismatches {}
+        foreach {page tag size} {
+            aiden_recipe aiden_recipe_close 78
+            aiden_profiles aiden_profiles_close 78
+            aiden_profiles aiden_preview_favorite 80
+            aiden_home aiden_ready_graph_detail 85
+            aiden_home aiden_active_graph_detail 85
+        } {
+            lassign [::layout::rect $page $tag] x y x1 y1
+            lassign [::layout::rect $page ${tag}_ring] vx vy vx1 vy1
+            set factor [expr {$::layout::width/2560.0}]
+            if {abs(($x+$x1)-($vx+$vx1))>.001 || abs(($y+$y1)-($vy+$vy1))>.001 || \
+                abs(($vx1-$vx)-$size*$factor)>.001 || $x>$vx || $y>$vy || $x1<$vx1 || $y1<$vy1} {lappend mismatches $tag}
+        }
+        set mismatches
+    } -result {}
+
+    test layout-$scale-4 {Four enlarged mode rows remain disjoint and route their new edge strips correctly} -body {
+        ::layout::home
+        set fields {}; set values {}
+        for {set i 0} {$i<4} {incr i} {
+            lappend fields [dict create key field_$i label "Field $i" available 1 min 0 max 100 step 1]
+            dict set values field_$i 50
+        }
+        ::aiden::ui::set_mode_settings flush [dict create title Flush fields $fields values $values editable 1]
+        ::aiden::ui::show modes
+        set previous {}; set ::fixture::actions {}
+        for {set i 0} {$i<4} {incr i} {
+            foreach sign {plus minus} {
+                set tag aiden_mode_field_${i}_$sign
+                set rect [::layout::rect aiden_modes $tag]
+                foreach old $previous {if {[::layout::intersects $rect $old]} {error {Mode targets overlap}}}
+                lappend previous $rect
+                lassign $rect x y x1 y1
+                # The top strip lies outside the previous 64-unit hit surface.
+                ::layout::tap aiden_modes $tag [expr {($x+$x1)/2}] [expr {$y+1}]
+                set expected [expr {$sign eq {plus} ? 51 : 50}]
+                if {[dict get $::aiden::ui::mode_draft field_$i] != $expected} {error {Mode step changed the wrong value}}
+                if {[lindex $::fixture::actions end] ne [list mode_edit flush field_$i $expected]} {error {Mode step dispatched the wrong edit}}
+            }
+        }
+        ::fixture::tap aiden_modes aiden_modes_apply
+        list [llength $::fixture::actions] [lindex $::fixture::actions end]
+    } -result {9 {mode_apply flush {field_0 50 field_1 50 field_2 50 field_3 50}}}
+
+    test layout-$scale-5 {Ready and active controls keep their state and primary-action routes} -body {
+        ::layout::home
+        set ::fixture::actions {}
+        set before [list [::fixture::state aiden_home aiden_start_hit] [::fixture::state aiden_home aiden_stop_hit]]
+        ::fixture::tap aiden_home aiden_start_hit
+        ::aiden::ui::render [dict replace $::aiden::ui::snapshot phase active busy 1 primary_action stop primary_enabled 1]
+        set after [list [::fixture::state aiden_home aiden_start_hit] [::fixture::state aiden_home aiden_stop_hit] \
+            [::fixture::state aiden_home aiden_profile_hit]]
+        ::fixture::tap aiden_home aiden_stop_hit
+        list $before $after $::fixture::actions
+    } -result {{normal hidden} {hidden normal hidden} {primary primary}}
+}
+
+cleanupTests

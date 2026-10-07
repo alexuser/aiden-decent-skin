@@ -173,8 +173,17 @@ proc ::aiden::ui::icon {page tag x y name {size 56} {tone soft} {group {}}} {
     return [dui add symbol $page $x $y -tags [list $tag {*}$group] -anchor center -symbol $symbol -font_size [expr {$size / 2.0}] -fill $palette($tone)]
 }
 
+proc ::aiden::ui::touch_bounds {x y width height} {
+    # 88 base-canvas units give a 44 px target at 1280 x 800. Keep the
+    # original center; icon artwork can remain smaller than its hit surface.
+    set target_width [expr {max(88, $width)}]
+    set target_height [expr {max(88, $height)}]
+    return [list [expr {$x-($target_width-$width)/2.0}] [expr {$y-($target_height-$height)/2.0}] $target_width $target_height]
+}
+
 proc ::aiden::ui::hit {page tag x y width height command {group {}}} {
     variable control_tags
+    lassign [touch_bounds $x $y $width $height] x y width height
     set control_tags($page,$tag) [list $tag ${tag}-btn]
     return [dui add dbutton $page $x $y -tags [list $tag {*}$group] -bwidth $width -bheight $height -shape {} -command $command]
 }
@@ -182,6 +191,7 @@ proc ::aiden::ui::hit {page tag x y width height command {group {}}} {
 proc ::aiden::ui::button {page tag x y width height title command {primary 0} {group {}}} {
     variable palette
     variable control_tags
+    lassign [touch_bounds $x $y $width $height] x y width height
     set control_tags($page,$tag) [list $tag ${tag}-btn ${tag}-out ${tag}-lbl]
     set fill $palette(raised)
     set foreground $palette(soft)
@@ -288,7 +298,7 @@ proc ::aiden::ui::mount_home {} {
     }
     label $page aiden_ready_profile 88 330 profile_title 64 text 1700 bold aiden_ready
     icon $page aiden_profile_chevron 1762 405 down 40 soft aiden_ready
-    hit $page aiden_profile_hit 72 309 1740 230 [list ::aiden::ui::dispatch profiles] aiden_ready
+    hit $page aiden_profile_hit 72 309 1740 176 [list ::aiden::ui::dispatch profiles] aiden_ready
     label $page aiden_recipe_summary 88 502 recipe_line 38 soft 1700 regular aiden_ready
     icon $page aiden_recipe_icon 1734 545 graph-options 40 soft aiden_ready
     hit $page aiden_recipe_hit 72 493 1710 105 [list ::aiden::ui::dispatch recipe] aiden_ready
@@ -497,13 +507,13 @@ proc ::aiden::ui::mount_modes {} {
     label $page aiden_modes_name 1035 592 modes_title 38 text 1290 bold
     label $page aiden_modes_detail 1035 677 modes_detail 18 muted 1290
     for {set i 0} {$i < 4} {incr i} {
-        set y [expr {760+$i*82}]
+        set y [expr {744+$i*96}]
         label $page aiden_mode_field_${i}_name 1035 $y mode_field_${i}_name 23 soft 575 regular aiden_mode_field_$i
         label $page aiden_mode_field_${i}_value 1670 $y mode_field_${i}_value 26 text 505 bold aiden_mode_field_$i
         button $page aiden_mode_field_${i}_minus 2170 [expr {$y-9}] 96 64 − [list ::aiden::ui::step_mode $i -1] 0 aiden_mode_field_$i
         button $page aiden_mode_field_${i}_plus 2290 [expr {$y-9}] 96 64 + [list ::aiden::ui::step_mode $i 1] 0 aiden_mode_field_$i
     }
-    label $page aiden_modes_hint 1035 1098 modes_hint 16 muted 1330
+    label $page aiden_modes_hint 1035 1124 modes_hint 16 muted 1330
     button $page aiden_modes_cancel 1035 1186 223 86 Cancel [list ::aiden::ui::cancel $page]
     button $page aiden_modes_apply 2081 1186 337 86 {Use settings} [list ::aiden::ui::commit_mode] 1
 }
@@ -808,11 +818,13 @@ proc ::aiden::ui::render_home_layout {} {
     if {[string length $data(profile_title)] > 28} {
         dui item config aiden_home aiden_ready_profile -font [fit_font $data(profile_title) 1700 244 46 26]
         # Two wrapped title lines have a reserved vertical band.
+        move_item aiden_home aiden_profile_hit 72 309 1812 539
         move_item aiden_home aiden_recipe_summary 88 602
         move_item aiden_home aiden_recipe_icon 1734 646
         move_item aiden_home aiden_recipe_hit 72 590 1782 701
     } else {
         dui item config aiden_home aiden_ready_profile -font [font 64 bold]
+        move_item aiden_home aiden_profile_hit 72 309 1812 485
         move_item aiden_home aiden_recipe_summary 88 502
         move_item aiden_home aiden_recipe_icon 1734 545
         move_item aiden_home aiden_recipe_hit 72 493 1782 598
