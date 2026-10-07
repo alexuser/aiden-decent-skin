@@ -14,6 +14,9 @@ namespace eval ::fixture {
     variable next 0
     variable vectors {}
     variable actions {}
+    variable scroll_calls {}
+    variable regression_failures {}
+    variable regression_cases 0
     variable elements
     array set elements {}
 }
@@ -65,7 +68,11 @@ proc ::fixture::tap {page tag} {
 proc ::fixture::widget {name args} {
     variable elements
     switch -- [lindex $args 0] {
-        yview {return {0 1}}
+        yview {
+            if {[llength $args] == 1} {return {0 1}}
+            lappend ::fixture::scroll_calls $args
+            return {}
+        }
         tag {
             if {[lindex $args 1] eq {names}} {return aiden_row_0}
             return {}
@@ -450,4 +457,132 @@ assert {$fitted < 20} {An unbroken title incorrectly fits on one line}
 rename ::font {}
 rename ::aiden::ui::font {}
 rename ::aiden::ui::fixture_saved_font ::aiden::ui::font
-puts "PASS: 9 pages, $items_before native items, [dict size $::fixture::commands] controls; graph/Stop, hidden rendering, keyboard-safe search, empty-preview, unknown-unit and unbroken-title checks."
+
+# These callbacks can arrive after filtering or a native operation takes the
+# screen. Exercise the actual press/move/release and page transitions, rather
+# than calling the selected-profile dispatcher directly.
+set ::fixture::gesture_catalog [list \
+    [dict create id one title First available 1 current 1 favorite 0] \
+    [dict create id two title Second available 1 current 0 favorite 1]]
+proc ::fixture::reset_profiles {} {
+    ::aiden::ui::render $::snapshot
+    ::aiden::ui::show profiles
+    ::aiden::ui::search_layout 0
+    set ::aiden::ui::query {}
+    ::aiden::ui::filter_favorites 0
+    ::aiden::ui::set_catalog $::fixture::gesture_catalog
+}
+proc ::fixture::regression {name script} {
+    incr ::fixture::regression_cases
+    if {[catch {uplevel #0 $script} problem]} {
+        lappend ::fixture::regression_failures "$name: $problem"
+    }
+}
+::fixture::regression search-takeover {
+    ::fixture::reset_profiles
+    ::aiden::ui::search_layout 1
+    set action_count [llength $::fixture::actions]
+    ::aiden::ui::render [dict replace $snapshot phase active busy 1 stop_available 1]
+    assert {$::aiden::ui::current_page eq {aiden_home}} {Active takeover did not reach Home}
+    assert {!$::aiden::ui::search_focused} {Active takeover retained search focus}
+    ::aiden::ui::render $snapshot
+    ::aiden::ui::show profiles
+    assert {[dict get $::fixture::canvas_options($list_id) -height] == 498.75} {Reopened search retained the shortened list}
+    assert {[::fixture::state aiden_profiles aiden_preview_title] eq {normal}} {Reopened search hid its preview}
+    assert {[::fixture::state aiden_profiles aiden_search_done] eq {hidden}} {Reopened search retained keyboard actions}
+    assert {[llength $::fixture::actions] == $action_count} {Search takeover dispatched a profile change}
+}
+::fixture::regression search-native-warning {
+    ::fixture::reset_profiles
+    ::aiden::ui::search_layout 1
+    set ::fixture::current native_alert
+    ::aiden::ui::render [dict replace $snapshot phase active busy 1 stop_available 1]
+    assert {$::fixture::current eq {native_alert}} {Search cleanup replaced a native warning}
+    assert {!$::aiden::ui::search_focused} {Native warning retained hidden search focus}
+    ::aiden::ui::render $snapshot
+    ::aiden::ui::show profiles
+    assert {[dict get $::fixture::canvas_options($list_id) -height] == 498.75} {Return from warning retained the shortened list}
+}
+::fixture::regression ordinary-profile-tap-and-drag {
+    ::fixture::reset_profiles
+    for {set i 0} {$i < 10} {incr i} {
+        set action_count [llength $::fixture::actions]
+        ::aiden::ui::touch_begin 10 20
+        ::aiden::ui::touch_end 12 23
+        assert {[llength $::fixture::actions] == $action_count + 1} {A normal tap did not select exactly once}
+        assert {[lindex $::fixture::actions end] eq {profile_select one}} {A normal tap selected the wrong identity}
+        set action_count [llength $::fixture::actions]
+        set scroll_count [llength $::fixture::scroll_calls]
+        ::aiden::ui::touch_begin 10 20
+        ::aiden::ui::touch_move 10 60
+        ::aiden::ui::touch_end 10 60
+        assert {[llength $::fixture::scroll_calls] == $scroll_count + 1} {A drag did not scroll}
+        assert {[llength $::fixture::actions] == $action_count} {A drag selected a profile}
+    }
+}
+foreach change {filter catalog} {
+    ::fixture::regression gesture-$change-change {
+        ::fixture::reset_profiles
+        ::aiden::ui::touch_begin 10 20
+        if {$change eq {filter}} {
+            ::aiden::ui::filter_favorites 1
+        } else {
+            ::aiden::ui::set_catalog [lreverse $::fixture::gesture_catalog]
+        }
+        set action_count [llength $::fixture::actions]
+        ::aiden::ui::touch_end 10 20
+        assert {[llength $::fixture::actions] == $action_count} {Release selected a replacement catalog row}
+    }
+}
+::fixture::regression gesture-page-change {
+    ::fixture::reset_profiles
+    ::aiden::ui::touch_begin 10 20
+    ::aiden::ui::show home
+    ::aiden::ui::show profiles
+    set action_count [llength $::fixture::actions]
+    ::aiden::ui::touch_end 10 20
+    assert {[llength $::fixture::actions] == $action_count} {Release from an earlier visit selected a profile}
+}
+::fixture::regression gesture-native-warning-release {
+    ::fixture::reset_profiles
+    ::aiden::ui::touch_begin 10 20
+    set ::fixture::current native_alert
+    set action_count [llength $::fixture::actions]
+    ::aiden::ui::touch_end 10 20
+    assert {[llength $::fixture::actions] == $action_count} {Hidden profile view accepted a release}
+    assert {$::fixture::current eq {native_alert}} {Hidden profile gesture replaced a native warning}
+}
+::fixture::regression gesture-native-warning-move-and-press {
+    ::fixture::reset_profiles
+    ::aiden::ui::touch_begin 10 20
+    set ::fixture::current native_alert
+    set scroll_count [llength $::fixture::scroll_calls]
+    ::aiden::ui::touch_move 10 60
+    assert {[llength $::fixture::scroll_calls] == $scroll_count} {Hidden profile view accepted a drag}
+    set action_count [llength $::fixture::actions]
+    ::aiden::ui::touch_begin 10 20
+    ::aiden::ui::touch_end 10 20
+    assert {[llength $::fixture::actions] == $action_count} {Hidden profile view accepted a new tap}
+}
+foreach destination {home native_alert} {
+    ::fixture::regression mode-late-callbacks-$destination {
+        ::aiden::ui::render $snapshot
+        ::aiden::ui::set_mode_settings steam [dict create title Steam values [dict create steam_flow 70] fields [list [lindex $fields 0]] editable 1]
+        ::aiden::ui::show modes
+        ::aiden::ui::step_mode 0 1
+        assert {[dict get $::aiden::ui::mode_draft steam_flow] == 80} {Visible mode edit did not work}
+        ::aiden::ui::commit_mode
+        assert {[lrange [lindex $::fixture::actions end] 0 1] eq {mode_apply steam}} {Visible mode Apply did not work}
+        if {$destination eq {home}} {::aiden::ui::show home} else {set ::fixture::current native_alert}
+        set action_count [llength $::fixture::actions]
+        set before $::aiden::ui::mode_draft
+        ::aiden::ui::step_mode 0 1
+        ::aiden::ui::commit_mode
+        assert {[llength $::fixture::actions] == $action_count} {Hidden mode view dispatched an edit or Apply}
+        assert {$::aiden::ui::mode_draft eq $before} {Hidden mode view changed its draft}
+    }
+}
+::aiden::ui::render $snapshot
+::aiden::ui::show home
+assert {$::fixture::regression_failures eq {}} "Interaction regressions: $::fixture::regression_failures"
+puts "PASS: 9 pages, $items_before native items, [dict size $::fixture::commands] controls; existing view checks plus $::fixture::regression_cases interrupted-search/gesture/mode cases and 10 repeated tap/drag cycles."

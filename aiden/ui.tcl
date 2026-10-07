@@ -727,6 +727,7 @@ proc ::aiden::ui::render {snapshotDict} {
         }
     }
     if {$mounted} {
+        if {$current_page eq {aiden_profiles} && ![profile_view_visible]} {end_profile_interaction}
         if {([active] || [boolean $snapshot busy]) && $current_page ne {aiden_home} && [string match aiden_* [dui page current]]} {show aiden_home}
         if {$current_page in {aiden_home aiden_graph}} {render_home_layout}
         set graph [get $snapshot graph {}]
@@ -851,6 +852,7 @@ proc ::aiden::ui::replace_icon {page tag name size tone} {
 proc ::aiden::ui::page_shown {page args} {
     variable current_page
     variable mounted
+    if {$current_page eq {aiden_profiles} && $page ne $current_page} {end_profile_interaction}
     set current_page $page
     if {!$mounted} {return}
     if {$page eq {aiden_home}} {render_home_layout}
@@ -872,6 +874,7 @@ proc ::aiden::ui::show {page} {
     if {![string match aiden_* $page]} {set page aiden_$page}
     if {$page ni $pages} {error "Unknown Aiden page '$page'"}
     if {([active] || [boolean $snapshot busy]) && $page ne {aiden_home}} {set page aiden_home}
+    if {$current_page eq {aiden_profiles} && $page ne $current_page} {end_profile_interaction}
     set current_page $page
     dui page show $page
     page_shown $page
@@ -1073,6 +1076,8 @@ proc ::aiden::ui::filter_favorites {value} {
 
 proc ::aiden::ui::finish_search {} {
     variable widgets
+    variable search_focused
+    set search_focused 0
     if {[info commands ::hide_android_keyboard] ne {}} {::hide_android_keyboard}
     focus [dui canvas]
     search_layout 0
@@ -1082,7 +1087,10 @@ proc ::aiden::ui::search_layout {focused} {
     variable search_focused
     variable mounted
     variable current_page
-    if {!$mounted || $current_page ne "aiden_profiles"} {return}
+    if {!$mounted || ![profile_view_visible]} {
+        if {!$focused} {set search_focused 0}
+        return
+    }
     set search_focused $focused
     visibility aiden_profiles aiden_profile_preview [expr {!$focused}]
     visibility aiden_profiles aiden_search_actions $focused
@@ -1109,6 +1117,9 @@ proc ::aiden::ui::render_catalog {} {
     variable data
     variable widgets
     variable palette
+    variable gesture
+    # A rebuilt row may identify a different profile at the same coordinates.
+    unset -nocomplain gesture(profile)
     set filtered {}
     foreach record $catalog {
         if {$favorites_only && ![boolean $record favorite]} {continue}
@@ -1186,9 +1197,22 @@ proc ::aiden::ui::render_catalog {} {
     refresh
 }
 
+proc ::aiden::ui::profile_view_visible {} {
+    variable current_page
+    return [expr {$current_page eq {aiden_profiles} && [dui page current] eq {aiden_profiles}}]
+}
+
+proc ::aiden::ui::end_profile_interaction {} {
+    variable gesture
+    variable search_focused
+    unset -nocomplain gesture(profile)
+    if {$search_focused} {finish_search}
+}
+
 proc ::aiden::ui::touch_begin {x y} {
     variable gesture
     variable widgets
+    if {![profile_view_visible]} {unset -nocomplain gesture(profile); return}
     lassign [$widgets(profiles) yview] first last
     set gesture(profile) [list $x $y 0 $first $last]
     focus $widgets(profiles)
@@ -1197,6 +1221,7 @@ proc ::aiden::ui::touch_begin {x y} {
 proc ::aiden::ui::touch_move {x y} {
     variable gesture
     variable widgets
+    if {![profile_view_visible]} {unset -nocomplain gesture(profile); return}
     if {![info exists gesture(profile)]} {return}
     lassign $gesture(profile) ox oy moved first last
     if {abs($x-$ox)>8 || abs($y-$oy)>8} {set moved 1}
@@ -1212,6 +1237,7 @@ proc ::aiden::ui::touch_end {x y} {
     if {![info exists gesture(profile)]} {return}
     lassign $gesture(profile) ox oy moved
     unset gesture(profile)
+    if {![profile_view_visible]} {return}
     if {$moved || abs($x-$ox)>8 || abs($y-$oy)>8} {return}
     foreach tag [$widgets(profiles) tag names @$x,$y] {
         if {[regexp {^aiden_row_([0-9]+)$} $tag -> row] && $row<[llength $filtered]} {
@@ -1308,6 +1334,8 @@ proc ::aiden::ui::step_mode {index direction} {
     variable mode_schema
     variable mode_draft
     variable editing_mode
+    variable current_page
+    if {$current_page ne {aiden_modes} || [dui page current] ne {aiden_modes}} {return}
     set fields [get $mode_schema fields {}]
     if {$index>=[llength $fields]} {return}
     set field [lindex $fields $index]
@@ -1334,6 +1362,8 @@ proc ::aiden::ui::step_mode {index direction} {
 proc ::aiden::ui::commit_mode {} {
     variable editing_mode
     variable mode_draft
+    variable current_page
+    if {$current_page ne {aiden_modes} || [dui page current] ne {aiden_modes}} {return}
     dispatch mode_apply $editing_mode $mode_draft
 }
 

@@ -6,9 +6,15 @@ namespace eval ::aiden {variable root [file join [::tcltest::temporaryDirectory]
 file mkdir $::aiden::root
 source [file join $root lifecycle.tcl]
 source [file join $root app.tcl]
-namespace eval ::fixture {variable calls {}; variable screen aiden_home; variable state {}; variable recipes 0}
+namespace eval ::fixture {
+    variable calls {}; variable screen aiden_home; variable state {}; variable recipes 0
+    variable snapshot_failure 0; variable recipe_failure 0; variable render_failures 0
+}
 namespace eval ::aiden::core {
-    proc snapshot {} {return $::fixture::state}
+    proc snapshot {} {
+        if {$::fixture::snapshot_failure} {error {synthetic snapshot failure}}
+        return $::fixture::state
+    }
     proc install_event_hooks {} {lappend ::fixture::calls observers}
     proc command {args} {lappend ::fixture::calls [linsert $args 0 command]}
     proc route {target} {
@@ -19,15 +25,20 @@ namespace eval ::aiden::core {
 }
 namespace eval ::aiden::recipe {
     proc configure {args} {}
-    proc working {} {return {title {Full profile name} dose 18 yield 36 temperature 93}}
+    proc working {} {
+        if {$::fixture::recipe_failure} {error {synthetic recipe sample failure}}
+        return {title {Full profile name} dose 18 yield 36 temperature 93}
+    }
     proc begin {kind} {return {dose 18 yield 36 temperature 93}}
     proc cancel {} {lappend ::fixture::calls cancel}
     proc catalog {} {return {}}
+    proc apply {args} {lappend ::fixture::calls recipe_apply}
 }
 namespace eval ::aiden::modes {
     proc configure {args} {}
     proc get {mode} {return {fields {}}}
     proc workflow {action args} {return {selected espresso workflows {espresso {order espresso skipped {}}}}}
+    proc apply {args} {lappend ::fixture::calls mode_apply}
 }
 namespace eval ::aiden::ui {
     proc mount {} {lappend ::fixture::calls mount}
@@ -35,7 +46,13 @@ namespace eval ::aiden::ui {
     proc mount_pending_stop {page} {}
     proc set_reduced_motion {value} {}
     proc show {page} {set ::fixture::screen $page}
-    proc render {snapshot} {set ::fixture::rendered $snapshot}
+    proc render {snapshot} {
+        if {$::fixture::render_failures > 0} {
+            incr ::fixture::render_failures -1
+            error {synthetic render failure}
+        }
+        set ::fixture::rendered $snapshot
+    }
     proc set_catalog {value} {}
     proc set_recipe {value} {}
 }
@@ -44,6 +61,14 @@ proc dui {args} {return $::fixture::screen}
 proc page_show {page} {set ::fixture::screen $page}
 proc skins_page_change_due_to_de1_state_change {state} {lappend ::fixture::calls [list native_state $state]}
 proc reset_fixture {{state idle}} {
+    if {$::aiden::app::timer ne {}} {after cancel $::aiden::app::timer}
+    if {$::aiden::app::hold_timer ne {}} {after cancel $::aiden::app::hold_timer}
+    set ::aiden::app::timer {}
+    set ::aiden::app::hold_timer {}
+    set ::aiden::app::last_snapshot {}
+    set ::aiden::app::last_status {}
+    set ::aiden::app::held_result {}
+    foreach flag {snapshot_failure recipe_failure render_failures} {set ::fixture::$flag 0}
     set ::fixture::calls {}
     set ::fixture::screen aiden_home
     set ::aiden::app::native_view 0
@@ -118,7 +143,36 @@ test safe-route-1 {Original UI route enables native presentation} -body {
     reset_fixture
     ::aiden::app::action original_skin
     list $::fixture::calls $::aiden::app::native_view
-} -result {{{route original}} 1}
+} -result {{{route original} cancel} 1}
+test original-route-recipe-error-1 {Optional recipe sampling cannot trap the user outside native controls} -setup {
+    reset_fixture
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::action original_skin
+    list $::fixture::calls $::fixture::screen $::aiden::app::native_view
+} -result {{{route original} cancel} off 1}
+test original-route-mode-error-1 {Optional mode sampling cannot prevent pure native navigation} -setup {
+    reset_fixture
+    rename ::aiden::modes::get ::fixture::saved_modes_get
+    proc ::aiden::modes::get {mode} {error {synthetic mode sample failure}}
+} -body {
+    ::aiden::app::action original_skin
+    list $::fixture::calls $::fixture::screen $::aiden::app::native_view
+} -cleanup {
+    rename ::aiden::modes::get {}
+    rename ::fixture::saved_modes_get ::aiden::modes::get
+} -result {{{route original} cancel} off 1}
+test original-route-rejected-1 {Core rejection still prevents Original view and retains presentation ownership} -setup {
+    reset_fixture
+    rename ::aiden::core::route ::fixture::saved_original_route
+    proc ::aiden::core::route {target} {error {Waiting for machine confirmation of Stop; navigation is locked}}
+} -body {
+    ::aiden::app::action original_skin
+    list $::fixture::calls $::fixture::screen $::aiden::app::native_view $::aiden::app::notice
+} -cleanup {
+    rename ::aiden::core::route {}
+    rename ::fixture::saved_original_route ::aiden::core::route
+} -result {{} aiden_home 0 {Waiting for machine confirmation of Stop; navigation is locked}}
 test pending-stop-repeat-1 {Repeated Stop taps do not replay a pending physical command} -body {
     reset_fixture
     ::aiden::app::action primary
@@ -148,7 +202,7 @@ test preserve-alert-1 {Native safety state remains native} -body {
     reset_fixture
     ::aiden::app::state_change Refill
     set ::fixture::calls
-} -result {{native_state Refill}}
+} -result {{native_state Refill} cancel}
 test unknown-action-1 {Unknown UI command is reported, never sent} -body {
     reset_fixture
     ::aiden::app::action unexpected
@@ -200,6 +254,267 @@ test standalone-module-failure-1 {Standalone module errors escape bootstrap for 
     removeDirectory $dir
     list $code $problem
 } -result {1 {synthetic module failure}}
+
+proc ::fixture::poll_count {} {
+    set count 0
+    foreach id [after info] {
+        if {[lindex [after info $id] 0] eq {::aiden::app::tick}} {incr count}
+    }
+    return $count
+}
+test sample-failure-actions-1 {A fresh sample failure prevents Start and both Apply dispatchers} -setup {
+    reset_fixture
+    ::aiden::app::tick
+    set ::fixture::snapshot_failure 1
+} -body {
+    foreach action {{primary} {recipe_apply {yield 40}} {mode_apply flush {flush_seconds 11}}} {
+        ::aiden::app::action {*}$action
+    }
+    list $::fixture::calls $::aiden::app::notice [::fixture::poll_count]
+} -result {{} {synthetic snapshot failure} 1}
+
+test poll-failure-recovery-1 {Repeated failed polls replace one timer, dispatch nothing, and recover} -setup {
+    reset_fixture
+    ::aiden::app::tick
+    set ::fixture::snapshot_failure 1
+} -body {
+    set replaced 1
+    set single 1
+    for {set i 0} {$i < 10} {incr i} {
+        set previous $::aiden::app::timer
+        ::aiden::app::tick
+        if {![catch {after info $previous}]} {set replaced 0}
+        if {[::fixture::poll_count] != 1} {set single 0}
+    }
+    set ::fixture::snapshot_failure 0
+    ::aiden::app::tick
+    list $replaced $single [::fixture::poll_count] $::fixture::calls \
+        [dict get $::fixture::rendered phase] [dict get $::fixture::rendered primary_enabled]
+} -result {1 1 1 {} prepared 1}
+
+test poll-pending-stop-recovery-1 {Polling failures never replay a pending Start or Stop} -setup {
+    reset_fixture
+    ::aiden::app::action primary
+    dict set ::fixture::state pending start
+    ::aiden::app::action stop
+    dict set ::fixture::state pending stop
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    for {set i 0} {$i < 3} {incr i} {::aiden::app::tick}
+    set ::fixture::recipe_failure 0
+    ::aiden::app::tick
+    list $::fixture::calls [::fixture::poll_count] \
+        [dict get $::fixture::rendered phase] [dict get $::fixture::rendered primary_enabled]
+} -result {{{command start espresso} {command stop}} 1 stop-requested 0}
+
+test poll-ready-sample-error-1 {A failed sample removes the earlier Ready presentation} -setup {
+    reset_fixture
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::tick
+    list [dict get $::fixture::rendered primary_enabled] $::aiden::app::notice $::fixture::calls
+} -result {0 {synthetic recipe sample failure} {}}
+
+test poll-ready-render-error-1 {A one-off render error removes the earlier Ready presentation} -setup {
+    reset_fixture
+    ::aiden::app::tick
+    set ::fixture::render_failures 1
+} -body {
+    ::aiden::app::tick
+    list [dict get $::fixture::rendered primary_enabled] $::aiden::app::notice $::fixture::calls
+} -result {0 {synthetic render failure} {}}
+
+test stop-noncore-sample-error-1 {An optional recipe sample error does not prevent core-guarded Stop} -setup {
+    reset_fixture
+    dict set ::fixture::state state espresso
+    dict set ::fixture::state native_state Espresso
+    dict set ::fixture::state mode espresso
+    dict set ::fixture::state editable 0
+    dict set ::fixture::state ready 0
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    set available [dict get $::fixture::rendered stop_available]
+    ::aiden::app::action stop
+    list $available $::fixture::calls [::fixture::poll_count]
+} -result {1 {{command stop}} 1}
+
+test primary-noncore-active-stop-1 {Primary falls back to Stop with fresh active core state and ignores repeated pending Stop} -setup {
+    reset_fixture
+    dict set ::fixture::state state espresso
+    dict set ::fixture::state native_state Espresso
+    dict set ::fixture::state mode espresso
+    dict set ::fixture::state editable 0
+    dict set ::fixture::state ready 0
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::action primary
+    dict set ::fixture::state pending stop
+    ::aiden::app::action primary
+    ::aiden::app::action primary
+    ::aiden::app::action stop
+    list $::fixture::calls [::fixture::poll_count]
+} -result {{{command stop}} 1}
+
+test primary-noncore-pending-start-1 {Primary cancels a pending Start through fresh core state without resending either command} -setup {
+    reset_fixture
+    ::aiden::app::action primary
+    dict set ::fixture::state pending start
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::action primary
+    dict set ::fixture::state pending stop
+    ::aiden::app::action primary
+    ::aiden::app::action stop
+    list $::fixture::calls [::fixture::poll_count]
+} -result {{{command start espresso} {command stop}} 1}
+
+test primary-noncore-idle-1 {Fresh Idle with an optional sample error cannot fall back to Start} -setup {
+    reset_fixture
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::action primary
+    list $::fixture::calls [::fixture::poll_count]
+} -result {{} 1}
+
+test primary-noncore-sleep-1 {Fresh Sleep with an optional sample error cannot fall back to Wake} -setup {
+    reset_fixture sleep
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+} -body {
+    ::aiden::app::action primary
+    list $::fixture::calls [::fixture::poll_count]
+} -result {{} 1}
+
+test primary-fallback-core-error-1 {Earlier active presentation cannot authorize Stop when the fresh core read also fails} -setup {
+    reset_fixture
+    dict set ::fixture::state state espresso
+    dict set ::fixture::state native_state Espresso
+    dict set ::fixture::state mode espresso
+    dict set ::fixture::state editable 0
+    dict set ::fixture::state ready 0
+    ::aiden::app::tick
+    set ::fixture::recipe_failure 1
+    set ::fixture::snapshot_failure 1
+} -body {
+    ::aiden::app::action primary
+    ::aiden::app::action stop
+    list $::fixture::calls [::fixture::poll_count]
+} -result {{} 1}
+
+# Real mode/workflow transactions run in a child interpreter. The normal
+# controller fixture retains its narrow mode stubs, and every native API in
+# this child is a recorder. Only a disposable workflow file can be written.
+proc ::fixture::stale_draft_probe {kind departure} {
+    set dir [makeDirectory [file join $::aiden::root draft-[clock clicks]]]
+    set child [interp create]
+    set code [catch {
+        $child eval [list namespace eval ::aiden [list variable root $dir]]
+        $child eval [list source [file join $::root lifecycle.tcl]]
+        $child eval [list source [file join $::root modes.tcl]]
+        $child eval [list source [file join $::root app.tcl]]
+        $child eval {namespace eval ::fixture {variable calls {}; variable screen aiden_home; variable snapshot_failure 0; variable recipe_failure 0; variable render_failures 0}}
+        foreach command {::aiden::core::snapshot ::aiden::core::command ::aiden::recipe::working ::aiden::recipe::cancel \
+            ::aiden::ui::show ::aiden::ui::render ::dui ::homedir ::page_show ::aiden::app::native_state_change} {
+            $child eval [list namespace eval [namespace qualifiers $command] {}]
+            $child eval [list proc $command [info args $command] [info body $command]]
+        }
+        $child eval {
+            rename ::aiden::ui::render ::fixture::render
+            proc ::aiden::ui::render {snapshot} {
+                ::fixture::render $snapshot
+                # Match the production view's polled active-operation takeover.
+                if {[::aiden::app::get $snapshot busy 0] && [string match aiden_* $::fixture::screen]} {
+                    ::aiden::ui::show aiden_home
+                }
+            }
+            proc ::aiden::ui::set_mode_settings {args} {}
+            proc ::aiden::ui::set_context {args} {}
+            proc ::save_settings {} {lappend ::fixture::calls save_settings}
+            proc ::de1_send_steam_hotwater_settings {} {lappend ::fixture::calls send_settings}
+            array set ::settings {flush_seconds 5 flush_flow 2.9 steam_timeout 62 steam_flow 80 steam_temperature 170 steam_disabled 0 water_temperature 85 water_volume 50 hotwater_flow 10 water_time_max 60 water_stop_on_scale 1}
+            array set ::de1 {scale_device_handle 0 in_eco_steam_mode 0 steam_disable_toggle 1}
+            ::aiden::modes::configure -state_file [file join $::aiden::root workflow.tcl]
+            ::aiden::lifecycle::reset
+        }
+        $child eval [list set ::fixture::state $::fixture::state]
+        $child eval [list set ::fixture::idle_state $::fixture::state]
+        $child eval [list set ::fixture::kind $kind]
+        $child eval [list set ::fixture::departure $departure]
+        set result [$child eval {
+            if {$::fixture::kind eq {mode}} {
+                ::aiden::app::action mode_settings flush
+                ::aiden::app::action mode_edit flush flush_seconds 11
+                set pending $::aiden::app::mode_draft
+                set apply [list ::aiden::app::action mode_apply flush $pending]
+            } else {
+                ::aiden::app::action workflow
+                ::aiden::app::action workflow_select latte
+                set apply {::aiden::app::action workflow_apply latte}
+            }
+            set active_guard not-applicable
+            if {$::fixture::departure in {native poll}} {
+                dict set ::fixture::state native_state Espresso
+                dict set ::fixture::state state espresso
+                dict set ::fixture::state mode espresso
+                dict set ::fixture::state editable 0
+                dict set ::fixture::state ready 0
+                if {$::fixture::departure eq {native}} {
+                    ::aiden::app::state_change Espresso
+                } else {::aiden::app::tick}
+                set ::fixture::calls {}
+                {*}$apply
+                if {$::fixture::kind eq {mode}} {
+                    set active_guard [expr {$::settings(flush_seconds) == 5 && $::fixture::calls eq {}}]
+                } else {
+                    set active_guard [expr {[dict get [::aiden::modes::workflow get] selected] eq {espresso} && ![file exists [file join $::aiden::root workflow.tcl]]}]
+                }
+                set ::fixture::state $::fixture::idle_state
+            } else {::aiden::app::action home}
+            set on_home [expr {$::fixture::screen eq {aiden_home}}]
+            set ::fixture::calls {}
+            if {$::fixture::kind eq {mode}} {
+                set retained [dict exists $::aiden::modes::drafts flush]
+                {*}$apply
+                set value $::settings(flush_seconds)
+                set persisted [expr {{save_settings} in $::fixture::calls}]
+            } else {
+                set retained [expr {$::aiden::modes::workflow_draft ne {}}]
+                {*}$apply
+                set value [dict get [::aiden::modes::workflow get] selected]
+                set persisted [file exists [file join $::aiden::root workflow.tcl]]
+            }
+            list $on_home $active_guard $retained $value $persisted
+        }]
+    } problem options]
+    interp delete $child
+    removeDirectory $dir
+    if {$code} {return -options $options $problem}
+    return $result
+}
+test mode-close-stale-apply-1 {Closing a mode draft blocks later Apply without reopening} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe mode home
+} -result {1 not-applicable 0 5 0}
+test mode-takeover-stale-apply-1 {Active guard rejects Apply, and completed takeover cannot revive its draft} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe mode native
+} -result {1 1 0 5 0}
+test workflow-close-stale-apply-1 {Closing a workflow draft blocks later Apply without reopening} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe workflow home
+} -result {1 not-applicable 0 espresso 0}
+test workflow-takeover-stale-apply-1 {Active guard rejects workflow Apply, and completed takeover cannot revive its draft} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe workflow native
+} -result {1 1 0 espresso 0}
+test mode-poll-takeover-stale-apply-1 {A polled operation discards the mode draft before the view leaves its editor} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe mode poll
+} -result {1 1 0 5 0}
+test workflow-poll-takeover-stale-apply-1 {A polled operation discards the workflow draft before the view leaves its editor} -setup {reset_fixture} -body {
+    ::fixture::stale_draft_probe workflow poll
+} -result {1 1 0 espresso 0}
 after cancel $::aiden::app::timer
 if {$::aiden::app::hold_timer ne {}} {after cancel $::aiden::app::hold_timer}
+file delete -force $::aiden::root
 cleanupTests

@@ -574,6 +574,78 @@ test routing-12 {Native saver background is detected through its exact legacy pa
         [::aiden::core::native_page_exists {saver||all}] $::core_fixture::calls
 } -result {1 0 0 {}}
 
+test routing-original-warmup-1 {Original and native_home permit Idle warm-up through direct UI navigation only} -body {
+    set results {}
+    foreach substate {1 2 999} {
+        foreach target {original native_home} {
+            ::core_fixture::setup
+            set ::de1(substate) $substate
+            set ::core_fixture::page aiden_utilities
+            set ::de1(current_context) aiden_utilities
+            set before [lsort [array get ::settings]]
+            set blocked [catch {::aiden::core::route $target}]
+            lappend results [list $blocked $::core_fixture::calls \
+                [expr {$before eq [lsort [array get ::settings]]}] \
+                [expr {$::de1(state) == 2 && $::de1(substate) == $substate && $::de1(device_handle) == 11}]]
+        }
+    }
+    set results
+} -result [lrepeat 6 {0 {{navigation off}} 1 1}]
+
+test routing-original-warmup-settings-1 {The pure native-home exception leaves all settings and other utility gates unchanged} -setup {
+    ::core_fixture::setup
+    set ::de1(substate) 1
+} -body {
+    set all_blocked 1
+    foreach target {profiles settings machine maintenance cleaning scale app extensions workflow descale history dye calibration} {
+        if {![catch {::aiden::core::route $target}]} {set all_blocked 0}
+    }
+    list $all_blocked $::core_fixture::calls
+} -result {1 {}}
+
+test routing-original-warmup-guards-1 {Original warm-up routing retains context, pending, finalization, unresolved flow and stress guards} -body {
+    set failures {}
+    foreach reason {stale_context pending_start pending_stop finalizing active_flow unresolved_flow_heating unresolved_flow_ready unknown_native stress_test idle_next_step} {
+        foreach target {original native_home} {
+            ::core_fixture::setup
+            set ::de1(substate) 1
+            switch -- $reason {
+                stale_context {set ::de1(current_context) tankempty}
+                pending_start {set ::aiden::core::pending_request {action start id 1 mode espresso new_operation 1}}
+                pending_stop {set ::aiden::core::pending_request {action stop id 1 mode espresso new_operation 1}}
+                finalizing {set ::core_fixture::finalizing 1}
+                active_flow {::core_fixture::flowing}
+                unresolved_flow_heating - unresolved_flow_ready {
+                    ::core_fixture::flowing
+                    # Raw Idle without the flow-ending event does not prove an
+                    # observed operation ended. Retain the original core data.
+                    set ::de1(state) 2
+                    set ::de1(substate) [expr {$reason eq {unresolved_flow_ready} ? 0 : 1}]
+                }
+                unknown_native {set ::de1(state) 999}
+                stress_test {set ::settings(stress_test) 1}
+                idle_next_step {set ::idle_next_step espresso}
+            }
+            if {![catch {::aiden::core::route $target}] || $::core_fixture::calls ne {}} {
+                lappend failures [list $reason $target $::core_fixture::calls]
+            }
+        }
+    }
+    set failures
+} -result {}
+
+test routing-original-completed-warmup-1 {A completed retained result does not prevent pure native navigation during later warm-up} -setup {
+    ::core_fixture::setup
+    ::core_fixture::flowing
+    ::core_fixture::end_flow
+    ::core_fixture::complete
+    set ::de1(substate) 1
+} -body {
+    set before $::aiden::core::completed_result
+    ::aiden::core::route original
+    list [expr {$before eq $::aiden::core::completed_result}] $::core_fixture::calls
+} -result {1 {{navigation off}}}
+
 test routing-9 {Optional native history open is direct DUI navigation; it does not rerun its vector initializer} -constraints nativeHistorySource -setup {
     set history_probe [interp create]
     $history_probe eval {set nav {}; proc ::dui {args} {lappend ::nav $args}}
@@ -843,6 +915,22 @@ test navigation-stop-2 {Real core navigation unlocks only after valid Stop proof
     list [expr {$before eq [lsort [array get ::settings]]}] $::core_fixture::calls \
         [dict get [::aiden::core::snapshot] pending]
 } -cleanup {::transport_fixture::cleanup} -result {1 {start_espresso start_idle {navigation history_viewer} {navigation off}} {}}
+
+test navigation-stop-warmup-1 {Verified no-flow Stop reconciliation permits native home even with a retained pre-flow mode} -setup {
+    ::transport_fixture::setup
+    ::core_fixture::native_event Espresso heating Idle ready 1000.0
+    set ::de1(state) 2
+    set ::de1(substate) 1
+    ::aiden::core::command stop
+} -body {
+    ::transport_fixture::packet w \x02
+    ::transport_fixture::packet r \x02\x01
+    set s [::aiden::core::snapshot]
+    set ::core_fixture::calls {}
+    ::aiden::core::route native_home
+    list [dict get $s pending] [dict get $s operation_reconciled] [dict get $s mode] \
+        [dict get $s flow_confirmed] [dict get $s flow_ended] $::core_fixture::calls
+} -cleanup {::transport_fixture::cleanup} -result {{} 1 espresso 0 0 {{navigation off}}}
 
 test navigation-stop-3 {Disconnect and stale reconnect proof never unlock real core utilities} -setup {
     ::transport_fixture::setup

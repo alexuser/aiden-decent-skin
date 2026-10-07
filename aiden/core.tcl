@@ -942,7 +942,13 @@ proc ::aiden::core::route {target} {
         [dict get $s pending] eq {} && ![dict get $s native_finalization_pending] && \
         [_mode [dict get $s native_state]] eq {} && \
         (![dict get $s flow_confirmed] || [dict get $s flow_ended])}]
-    if {(![dict get $s editable] && !$sleeping && !$offline_setup) || ![dict get $s context_verified]} {
+    set continuing_flow [expr {[dict get $s flow_confirmed] && ![dict get $s flow_ended]}]
+    # Returning to the installed view is pure navigation, even while Idle is
+    # heating. Retained mode alone is not activity after verified cancellation.
+    set idle_home [expr {$target in {original native_home} && [dict get $s native_state] eq "Idle" && \
+        [dict get $s pending] eq {} && ![dict get $s native_finalization_pending] && !$continuing_flow}]
+    if {(![dict get $s editable] && !$sleeping && !$offline_setup && !$idle_home) || \
+        ![dict get $s context_verified] || ($target in {original native_home} && $continuing_flow)} {
         error {Native utilities require a verified idle machine and current screen}
     }
     if {[_boolean [_read ::settings(stress_test)] 1] || [_read ::idle_next_step] ne {}} {

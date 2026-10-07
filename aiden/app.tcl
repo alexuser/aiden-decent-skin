@@ -28,6 +28,46 @@ proc ::aiden::app::report {problem {options {}}} {
     }
 }
 
+proc ::aiden::app::cancel_drafts {} {
+    variable mode_draft
+    variable workflow_draft
+    catch {::aiden::recipe::cancel}
+    foreach mode {flush steam water} {catch {::aiden::modes::cancel $mode}}
+    catch {::aiden::modes::workflow cancel}
+    set mode_draft {}
+    set workflow_draft {}
+}
+
+proc ::aiden::app::require_page {page} {
+    if {[::dui page current] ne $page} {error {Reopen the current draft before editing or applying}}
+}
+
+proc ::aiden::app::stop_snapshot {} {
+    # Stop depends on fresh machine state, never on optional recipe/UI reads.
+    set native [::aiden::core::snapshot]
+    return [dict merge $native [::aiden::lifecycle::ingest $native]]
+}
+
+proc ::aiden::app::failed_snapshot {problem} {
+    variable last_snapshot
+    set safe [dict create mode [get $last_snapshot mode espresso] busy [get $last_snapshot busy 0]]
+    catch {set safe [stop_snapshot]}
+    set intent wait
+    set enabled 0
+    if {[get $safe primary_action] eq "stop"} {
+        set intent stop
+        set enabled [get $safe primary_enabled 0]
+    }
+    return [dict merge $safe [dict create state unknown ready 0 editable 0 can_edit 0 \
+        context_verified 0 can_wake 0 can_sleep 0 can_reconnect 0 can_recover 0 can_tare 0 \
+        auto_handoff_available 0 primary_action $intent primary_enabled $enabled \
+        primary_name [expr {$intent eq "stop" ? {Stop} : {Not ready}}] \
+        status {Machine state unavailable} status_detail {Aiden could not refresh the screen. Use physical Stop if needed.} \
+        notice $problem note $problem readiness unknown weight {} weight_quality unavailable \
+        temperature {} pressure {} flow {} elapsed {} graph {} \
+        scale [dict create weight {} quality unavailable status unknown can_tare 0]]]
+}
+
 proc ::aiden::app::boot {} {
     variable started
     if {$started} {return}
@@ -77,6 +117,7 @@ proc ::aiden::app::state_change {state} {
     set previous [::dui page current]
     # Always retain Decent/DSx2's existing state processing and safety screens.
     ::aiden::app::native_state_change $state
+    if {$state ne "Idle"} {cancel_drafts}
     if {!$native_view && [string match ghc_* $previous] && $state eq "Idle" &&
             [get [::aiden::core::snapshot] pending] eq "start"} {
         # A tablet request can remain Idle until the physical GHC is pressed.
@@ -89,7 +130,6 @@ proc ::aiden::app::state_change {state} {
     }
     if {!$native_view && ([string match aiden_* $previous] || [string match ghc_* $previous]) && \
         $state in {Idle Espresso Steam HotWater HotWaterRinse Sleep GoingToSleep}} {
-        if {$state ne "Idle"} {catch {::aiden::recipe::cancel}}
         ::aiden::ui::show aiden_home
     }
 }
@@ -116,6 +156,14 @@ proc ::aiden::app::sample {} {
         target_yield [get $recipe yield] target_temp [get $recipe temperature]]]
     dict set native recipe $recipe
     set p [::aiden::lifecycle::ingest $native]
+    variable mode_draft
+    variable workflow_draft
+    if {($mode_draft ne {} || $workflow_draft ne {}) &&
+            ([get $p busy 0] || [::dui page current] ni {aiden_modes aiden_workflow})} {
+        # A renderer or native warning can take the page without state_change.
+        # Hidden drafts cannot survive that interruption and later be applied.
+        cancel_drafts
+    }
     set snapshot [dict merge $native $p]
     set can_wake [expr {[get $native native_state] eq "Sleep" && [get $native connected 0] && \
         [get $native pending] eq {} && ![get $p busy 0] && [get $p primary_action] ne "stop"}]
@@ -154,31 +202,35 @@ proc ::aiden::app::sample {} {
     return $snapshot
 }
 
+proc ::aiden::app::record_status {snapshot} {
+    variable last_status
+    set status {}
+    foreach key {native_state native_substate connected pending phase mode primary_action primary_enabled current_page context_verified stop_verification} {
+        dict set status $key [get $snapshot $key]
+    }
+    if {[info exists ::de1(device_handle)]} {
+        dict set status handle_integer [string is integer -strict $::de1(device_handle)]
+        dict set status handle_zero [expr {$::de1(device_handle) eq "0"}]
+        dict set status handle_empty [expr {$::de1(device_handle) eq {}}]
+    }
+    if {$status ne $last_status} {
+        set fd [open [file join $::aiden::root status.tcl] w]
+        set code [catch {puts $fd $status; close $fd} problem options]
+        if {$code} {catch {close $fd}; return -options $options $problem}
+        set last_status $status
+    }
+}
+
 proc ::aiden::app::tick {} {
     variable timer
     variable last_snapshot
     variable hold_timer
     variable held_result
-    variable last_status
     if {$timer ne {}} {after cancel $timer; set timer {}}
     if {[catch {
         set last_snapshot [sample]
         ::aiden::ui::render $last_snapshot
-        set status {}
-        foreach key {native_state native_substate connected pending phase mode primary_action primary_enabled current_page context_verified stop_verification} {
-            dict set status $key [get $last_snapshot $key]
-        }
-        if {[info exists ::de1(device_handle)]} {
-            dict set status handle_integer [string is integer -strict $::de1(device_handle)]
-            dict set status handle_zero [expr {$::de1(device_handle) eq "0"}]
-            dict set status handle_empty [expr {$::de1(device_handle) eq {}}]
-        }
-        if {$status ne $last_status} {
-            set fd [open [file join $::aiden::root status.tcl] w]
-            puts $fd $status
-            close $fd
-            set last_status $status
-        }
+        record_status $last_snapshot
         if {[get $last_snapshot auto_handoff_available 0]} {
             set id [get [get $last_snapshot operation_result] id]
             if {$hold_timer eq {} && $held_result ne $id} {
@@ -186,7 +238,15 @@ proc ::aiden::app::tick {} {
                 set hold_timer [after 1500 [list ::aiden::app::finish_hold $id]]
             }
         } elseif {$hold_timer ne {}} {after cancel $hold_timer; set hold_timer {}}
-    } problem options]} {report $problem $options}
+    } problem options]} {
+        report $problem $options
+        if {$hold_timer ne {}} {after cancel $hold_timer; set hold_timer {}}
+        set last_snapshot [failed_snapshot $problem]
+        # A second render handles a transient renderer error. Persistent UI
+        # errors remain reported; no callback or retry sends a machine command.
+        catch {::aiden::ui::render $last_snapshot}
+        catch {record_status $last_snapshot}
+    }
     set interval 500
     if {[get $last_snapshot busy 0]} {set interval 100}
     set timer [after $interval ::aiden::app::tick]
@@ -203,6 +263,7 @@ proc ::aiden::app::finish_hold {id} {
 proc ::aiden::app::route {target} {
     variable native_view
     ::aiden::core::route $target
+    cancel_drafts
     set native_view 1
 }
 
@@ -231,11 +292,28 @@ proc ::aiden::app::action {name args} {
     variable mode_draft
     variable workflow_draft
     set notice {}
+    if {$name in {native original original_skin saved_setups}} {
+        # Returning to native controls must not depend on optional recipe/mode
+        # reads. The core independently checks the current machine/page state.
+        if {[catch {route original} problem options]} {report $problem $options}
+        tick
+        return
+    }
     if {[catch {
-        set snapshot [sample]
+        if {$name eq "stop"} {
+            set snapshot [stop_snapshot]
+        } elseif {[catch {set snapshot [sample]} problem options]} {
+            # A primary button showing Stop must still work if optional reads
+            # fail. Fresh core/lifecycle data may authorize only Stop here.
+            if {$name ne "primary"} {return -options $options $problem}
+            set snapshot [stop_snapshot]
+            if {[get $snapshot primary_action] ne "stop" || ![get $snapshot primary_enabled 0]} {
+                return -options $options $problem
+            }
+        }
         switch -- $name {
             home - back - close {
-                ::aiden::recipe::cancel
+                cancel_drafts
                 set native_view 0
                 ::aiden::ui::show aiden_home
             }
@@ -244,7 +322,9 @@ proc ::aiden::app::action {name args} {
                 if {![get $snapshot primary_enabled 0]} {error [get $snapshot status {Unavailable}]}
                 switch -- $intent {
                     start - stop {
-                        set reply [::aiden::lifecycle::request $intent [dict create recipe [dict get $snapshot recipe]]]
+                        set details {}
+                        if {$intent eq "start"} {set details [dict create recipe [dict get $snapshot recipe]]}
+                        set reply [::aiden::lifecycle::request $intent $details]
                         if {![dict get $reply accepted]} {error [dict get $reply reason]}
                         if {$intent eq "start"} {dispatch_operation start [dict get $snapshot mode]} else {dispatch_operation stop}
                     }
@@ -296,7 +376,6 @@ proc ::aiden::app::action {name args} {
             history {route history}
             graph {::aiden::ui::set_context aiden_home [dict create graph_expanded 1]}
             route {route [lindex $args 0]}
-            native - original - original_skin - saved_setups {route original}
             advanced {route profiles}
             devices {route scale}
             extensions {route extensions}
@@ -311,17 +390,25 @@ proc ::aiden::app::action {name args} {
                 ::aiden::ui::show aiden_modes
             }
             mode_edit {
+                require_page aiden_modes
                 set mode_draft [::aiden::modes::edit {*}$args]
                 ::aiden::ui::set_mode_settings [lindex $args 0] $mode_draft
             }
-            mode_apply {::aiden::modes::apply {*}$args; ::aiden::ui::show aiden_home}
-            mode_cancel {::aiden::modes::cancel {*}$args; ::aiden::ui::show aiden_home}
-            workflow_select {set workflow_draft [::aiden::modes::workflow begin [lindex $args 0]]}
-            workflow_cancel {::aiden::modes::workflow cancel; ::aiden::ui::show aiden_home}
+            mode_apply {
+                require_page aiden_modes
+                ::aiden::modes::apply {*}$args
+                set mode_draft {}
+                ::aiden::ui::show aiden_home
+            }
+            mode_cancel {::aiden::modes::cancel {*}$args; set mode_draft {}; ::aiden::ui::show aiden_home}
+            workflow_select {require_page aiden_workflow; set workflow_draft [::aiden::modes::workflow begin [lindex $args 0]]}
+            workflow_cancel {::aiden::modes::workflow cancel; set workflow_draft {}; ::aiden::ui::show aiden_home}
             workflow_save {route original}
             workflow_apply {
+                require_page aiden_workflow
                 if {[get $workflow_draft id] ne [lindex $args 0]} {error {Reopen the workflow draft}}
                 ::aiden::modes::workflow apply $workflow_draft
+                set workflow_draft {}
                 sync_workflow
                 ::aiden::ui::show aiden_home
             }
