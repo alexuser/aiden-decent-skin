@@ -326,6 +326,64 @@ test poll-ready-render-error-1 {A one-off render error removes the earlier Ready
     list [dict get $::fixture::rendered primary_enabled] $::aiden::app::notice $::fixture::calls
 } -result {0 {synthetic render failure} {}}
 
+test poll-ready-diagnostic-error-1 {Failed diagnostic I/O preserves a healthy Start and one poll timer} -setup {
+    reset_fixture
+    file delete -force [file join $::aiden::root status.tcl]
+    file mkdir [file join $::aiden::root status.tcl]
+} -body {
+    ::aiden::app::tick
+    ::aiden::app::tick
+    list [dict get $::fixture::rendered ready] [dict get $::fixture::rendered primary_action] \
+        [dict get $::fixture::rendered primary_enabled] [::fixture::poll_count] \
+        [string match {*status.tcl*} $::aiden::app::notice] $::fixture::calls
+} -cleanup {
+    file delete -force [file join $::aiden::root status.tcl]
+} -result {1 start 1 1 1 {}}
+
+test poll-stop-diagnostic-error-1 {Failed diagnostic I/O retains fresh Stop without replaying a pending Stop} -setup {
+    reset_fixture
+    dict set ::fixture::state state espresso
+    dict set ::fixture::state native_state Espresso
+    dict set ::fixture::state mode espresso
+    dict set ::fixture::state editable 0
+    dict set ::fixture::state ready 0
+    file delete -force [file join $::aiden::root status.tcl]
+    file mkdir [file join $::aiden::root status.tcl]
+} -body {
+    ::aiden::app::tick
+    set presentation [list [dict get $::fixture::rendered primary_action] \
+        [dict get $::fixture::rendered primary_enabled]]
+    ::aiden::app::action primary
+    dict set ::fixture::state pending stop
+    ::aiden::app::tick
+    ::aiden::app::action primary
+    list $presentation $::fixture::calls [dict get $::fixture::rendered primary_enabled] \
+        [::fixture::poll_count]
+} -cleanup {
+    file delete -force [file join $::aiden::root status.tcl]
+} -result {{stop 1} {{command stop}} 0 1}
+
+test poll-hold-diagnostic-error-1 {Failed diagnostic I/O neither prevents nor cancels a result hold} -setup {
+    reset_fixture
+    set ::fixture::hold_snapshot [dict merge [::aiden::app::sample] \
+        {auto_handoff_available 1 operation_result {id diagnostic-result}}]
+    rename ::aiden::app::sample ::fixture::saved_sample
+    proc ::aiden::app::sample {} {return $::fixture::hold_snapshot}
+    file delete -force [file join $::aiden::root status.tcl]
+    file mkdir [file join $::aiden::root status.tcl]
+} -body {
+    ::aiden::app::tick
+    set hold $::aiden::app::hold_timer
+    set scheduled [expr {$hold ne {} && ![catch {after info $hold}]}]
+    ::aiden::app::tick
+    list $scheduled [expr {$hold ne {} && $hold eq $::aiden::app::hold_timer}] \
+        [::fixture::poll_count] $::fixture::calls
+} -cleanup {
+    rename ::aiden::app::sample {}
+    rename ::fixture::saved_sample ::aiden::app::sample
+    file delete -force [file join $::aiden::root status.tcl]
+} -result {1 1 1 {}}
+
 test stop-noncore-sample-error-1 {An optional recipe sample error does not prevent core-guarded Stop} -setup {
     reset_fixture
     dict set ::fixture::state state espresso

@@ -230,7 +230,8 @@ proc ::aiden::app::tick {} {
     if {[catch {
         set last_snapshot [sample]
         ::aiden::ui::render $last_snapshot
-        record_status $last_snapshot
+        # Diagnostic I/O cannot invalidate a fresh sample or cancel its result hold.
+        if {[catch {record_status $last_snapshot} problem options]} {report $problem $options}
         if {[get $last_snapshot auto_handoff_available 0]} {
             set id [get [get $last_snapshot operation_result] id]
             if {$hold_timer eq {} && $held_result ne $id} {
